@@ -1,38 +1,39 @@
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><script>(function(){
 var API='/api/state',P='daddys-list',SKIP=/^daddys-list-(bright|nightshift|state-v1-backup)$/;
-var ls,_set=Storage.prototype.setItem,timer=null,ver=0;
+var ls,_set=Storage.prototype.setItem,_rem=Storage.prototype.removeItem,timer=null,ver=0,base='',lastTouch=0;
 try{ls=window.localStorage;ls.getItem('x')}catch(e){return}
 function tok(){return ls.getItem('__dl_token')||''}
-function hdr(x){if(tok())x.setRequestHeader('x-sync-token',tok())}
+function hdrs(){var h={'content-type':'application/json'};if(tok())h['x-sync-token']=tok();return h}
 function synced(k){return k&&k.indexOf(P)===0&&!SKIP.test(k)}
 function snap(){var o={};for(var i=0;i<ls.length;i++){var k=ls.key(i);if(synced(k))o[k]=ls.getItem(k)}return o}
 function apply(d){var del=[];for(var i=0;i<ls.length;i++){var k=ls.key(i);if(synced(k)&&!(k in d))del.push(k)}
-del.forEach(function(k){ls.removeItem(k)});for(var k in d)_set.call(ls,k,d[k])}
-function pullSync(){try{var x=new XMLHttpRequest();x.open('GET',API+'?t='+Date.now(),false);hdr(x);x.send();
+del.forEach(function(k){_rem.call(ls,k)});for(var k in d)_set.call(ls,k,d[k])}
+function pullSync(){try{var x=new XMLHttpRequest();x.open('GET',API+'?t='+Date.now(),false);if(tok())x.setRequestHeader('x-sync-token',tok());x.send();
 if(x.status===401){var t=prompt('Enter your daddys-list sync passcode');if(t){_set.call(ls,'__dl_token',t);return pullSync()}return null}
 if(x.status===200)return JSON.parse(x.responseText)}catch(e){}return null}
-function pushSync(){try{var x=new XMLHttpRequest();x.open('PUT',API,false);x.setRequestHeader('content-type','application/json');hdr(x);
-x.send(JSON.stringify({data:snap()}));if(x.status===200){ver=JSON.parse(x.responseText).version;_set.call(ls,'__dl_ver',ver);_set.call(ls,'__dl_dirty','0')}}catch(e){}}
-function push(){timer=null;var h={'content-type':'application/json'};if(tok())h['x-sync-token']=tok();
-fetch(API,{method:'PUT',headers:h,body:JSON.stringify({data:snap()}),keepalive:true})
-.then(function(r){return r.ok?r.json():Promise.reject()})
-.then(function(j){ver=j.version;_set.call(ls,'__dl_ver',ver);if(!timer)_set.call(ls,'__dl_dirty','0')}).catch(function(){})}
-function touch(k){if(!synced(k))return;_set.call(ls,'__dl_dirty','1');clearTimeout(timer);timer=setTimeout(push,1000)}
+function pushSync(){try{var x=new XMLHttpRequest();x.open('PUT',API,false);x.setRequestHeader('content-type','application/json');if(tok())x.setRequestHeader('x-sync-token',tok());
+var s=snap();x.send(JSON.stringify({data:s}));if(x.status===200){ver=JSON.parse(x.responseText).version;base=JSON.stringify(s);_set.call(ls,'__dl_dirty','0')}}catch(e){}}
+function getRemote(){return fetch(API+'?t='+Date.now(),{headers:hdrs(),cache:'no-store'}).then(function(r){return r.ok?r.json():null})}
+function put(){var s=snap(),js=JSON.stringify(s);if(js===base){if(!timer)_set.call(ls,'__dl_dirty','0');return Promise.resolve()}
+return fetch(API,{method:'PUT',headers:hdrs(),body:JSON.stringify({data:s}),keepalive:true}).then(function(r){return r.ok?r.json():Promise.reject()})
+.then(function(j){ver=j.version;base=js;if(!timer)_set.call(ls,'__dl_dirty','0')})}
+function push(force){timer=null;
+if(force===true)return put().catch(function(){});
+getRemote().then(function(j){
+if(j&&j.data&&j.version>ver){_set.call(ls,'__dl_dirty','0');location.reload();return}
+return put()}).catch(function(){})}
+function touch(k){if(!synced(k))return;_set.call(ls,'__dl_dirty','1');clearTimeout(timer);timer=setTimeout(push,300)}
 Storage.prototype.setItem=function(k,v){_set.call(this,k,v);if(this===ls)touch(k)};
-var _rem=Storage.prototype.removeItem;
 Storage.prototype.removeItem=function(k){_rem.call(this,k);if(this===ls)touch(k)};
-// initial load: pull from server (or seed it / push unsynced local edits)
 var dirty=ls.getItem('__dl_dirty')==='1',r=pullSync();
 if(r){ver=r.version||0;
-if(r.data&&!dirty){apply(r.data);_set.call(ls,'__dl_ver',ver)}
-else{pushSync()}}
-function flush(){if(timer){clearTimeout(timer);push()}}
-document.addEventListener('visibilitychange',function(){
-if(document.visibilityState==='hidden')return flush();
-if(timer||ls.getItem('__dl_dirty')==='1')return;
-var h={};if(tok())h['x-sync-token']=tok();
-fetch(API+'?t='+Date.now(),{headers:h,cache:'no-store'}).then(function(r){return r.ok?r.json():null})
-.then(function(j){if(j&&j.data&&j.version>ver&&!timer)location.reload()}).catch(function(){})});
+if(r.data&&!dirty){apply(r.data);base=JSON.stringify(snap())}else{pushSync()}}
+function poll(){if(document.visibilityState!=='visible'||timer||ls.getItem('__dl_dirty')==='1'||Date.now()-lastTouch<3000)return;
+getRemote().then(function(j){if(j&&j.data&&j.version>ver&&!timer&&Date.now()-lastTouch>=3000)location.reload()}).catch(function(){})}
+setInterval(poll,4000);
+['pointerdown','touchstart','touchmove','keydown'].forEach(function(e){document.addEventListener(e,function(){lastTouch=Date.now()},true)});
+function flush(){if(timer){clearTimeout(timer);push(true)}}
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden')flush();else poll()});
 window.addEventListener('pagehide',flush);
 })();
 </script><script>try{var _k="daddys-list-state",_o=JSON.parse(localStorage.getItem(_k)||"{}")||{};if(!_o.w150){_o.vw_0=150;_o.w150=1;localStorage.setItem(_k,JSON.stringify(_o))}}catch(e){}</script><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="daddy's list"><meta name="theme-color" content="#000000" id="theme-color-meta"><meta name="mobile-web-app-capable" content="yes"><script>(function(){window.__LOW=!1;try{if(!(window.CSS&&CSS.supports&&CSS.supports('selector(:has(*))')))document.addEventListener('DOMContentLoaded',function(){var b=document.createElement('div');b.textContent="Please update Chrome so daddy's list shows correctly.";b.style.cssText='position:fixed;left:0;right:0;bottom:0;padding:10px;background:#000;color:#ef4444;font:700 13px monospace;text-align:center;z-index:2147483647';document.body.appendChild(b)})}catch(e){}})();</script><title>daddy's list</title><style>*{-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none;-webkit-touch-callout:none;box-sizing:border-box}input,textarea{-webkit-user-select:auto;-moz-user-select:auto;-ms-user-select:auto;user-select:auto}:root{
