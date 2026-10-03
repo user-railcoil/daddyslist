@@ -22,6 +22,13 @@ export default async (req) => {
       return Response.json(rec, { headers });
     }
 
+    // admin cleared the chat
+    if (b.clear === true && b.from === "daddy") {
+      rec.messages = [];
+      await store.setJSON("chat", rec);
+      return Response.json(rec, { headers });
+    }
+
     const text = String(b.text || "").trim().slice(0, 1000);
     if (!text) return new Response("empty", { status: 400 });
     const from = b.from === "daddy" ? "daddy" : "lovey";
