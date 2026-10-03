@@ -1146,6 +1146,7 @@ css.textContent=`
 #dlc-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #1d2a26}
 #dlc-head b{color:#4fb396;font-size:16px}
 #dlc-who{flex:1;text-align:right;font-size:12px;color:#e0443c;text-decoration:underline}
+#dlc-clear{display:none;background:none;border:1px solid #e0443c;color:#e0443c;border-radius:8px;font:700 11px monospace;padding:4px 8px}
 #dlc-x{background:none;border:0;color:#fff;font-size:20px;padding:4px 8px}
 #dlc-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;gap:8px;padding:12px 14px}
 .dlc-empty{margin:auto;color:#8a98a0;font-size:14px}
@@ -1168,7 +1169,7 @@ css.textContent=`
 #dlc-a-ok{margin-top:18px;width:100%;padding:18px;border-radius:16px;border:0;background:#fff;color:#a3121c;font:800 20px system-ui,sans-serif}`;
 document.head.appendChild(css);
 var root=document.createElement('div');
-root.innerHTML='<button id="dlc-btn" aria-label="Messages">\uD83D\uDCAC<i id="dlc-badge"></i></button><div id="dlc-toast"></div><div id="dlc-panel"><div id="dlc-head"><b id="dlc-title">Daddy \u2764</b><span id="dlc-who"></span><button id="dlc-x" aria-label="Close">\u2715</button></div><div id="dlc-list"></div><div id="dlc-form"><input id="dlc-in" type="text" placeholder="Type a message..." autocomplete="off" enterkeyhint="send"><button id="dlc-alertbtn">\uD83D\uDEA8 Alert</button><button id="dlc-send">Send</button></div></div><div id="dlc-alert"><div class="dlc-a-in"><div class="dlc-a-top">\uD83D\uDEA8 MESSAGE FROM DADDY \uD83D\uDEA8</div><div id="dlc-a-text"></div><button id="dlc-a-ok">Got it \u2764</button></div></div>';
+root.innerHTML='<button id="dlc-btn" aria-label="Messages">\uD83D\uDCAC<i id="dlc-badge"></i></button><div id="dlc-toast"></div><div id="dlc-panel"><div id="dlc-head"><b id="dlc-title">Daddy \u2764</b><span id="dlc-who"></span><button id="dlc-clear">Clear all</button><button id="dlc-x" aria-label="Close">\u2715</button></div><div id="dlc-list"></div><div id="dlc-form"><input id="dlc-in" type="text" placeholder="Type a message..." autocomplete="off" enterkeyhint="send"><button id="dlc-alertbtn">\uD83D\uDEA8 Alert</button><button id="dlc-send">Send</button></div></div><div id="dlc-alert"><div class="dlc-a-in"><div class="dlc-a-top">\uD83D\uDEA8 MESSAGE FROM DADDY \uD83D\uDEA8</div><div id="dlc-a-text"></div><button id="dlc-a-ok">Got it \u2764</button></div></div>';
 document.body.appendChild(root);
 ['touchstart','touchmove','touchend','pointerdown','pointerup','mousedown','mouseup','click','keydown','keyup','contextmenu'].forEach(function(e){['dlc-btn','dlc-panel','dlc-toast','dlc-alert'].forEach(function(id){$(id).addEventListener(e,function(ev){ev.stopPropagation()})})});
 function unlock(){try{if(!ac){var C=window.AudioContext||window.webkitAudioContext;if(C)ac=new C()}if(ac&&ac.state==='suspended')ac.resume()}catch(e){}}
@@ -1188,7 +1189,7 @@ if(!msgs.length){var e=document.createElement('div');e.className='dlc-empty';e.t
 msgs.forEach(function(m){var mine=m.from===r,d=document.createElement('div');d.className='dlc-m '+(mine?'me':'them')+(m.alert?' al':'');var t=document.createElement('div');t.textContent=(m.alert?'\uD83D\uDEA8 ':'')+m.text;var tm=document.createElement('small');
 var meta=(mine?'':label(m.from)+' \u00B7 ')+fmt(m.id);if(m.alert&&mine)meta+=m.ackAt?' \u00B7 \u2713 seen '+fmt(m.ackAt):' \u00B7 not seen yet';tm.textContent=meta;d.appendChild(t);d.appendChild(tm);L.appendChild(d)});
 if(stick||near)L.scrollTop=L.scrollHeight}
-function ui(){var a=role()==='daddy';$('dlc-alertbtn').style.display=a?'block':'none';$('dlc-who').textContent=a?'ADMIN \u00B7 tap for her view':'';$('dlc-title').textContent=a?'Messages':'Daddy \u2764'}
+function ui(){var a=role()==='daddy';$('dlc-clear').style.display=a?'block':'none';$('dlc-alertbtn').style.display=a?'block':'none';$('dlc-who').textContent=a?'ADMIN \u00B7 tap for her view':'';$('dlc-title').textContent=a?'Messages':'Daddy \u2764'}
 function hideToast(){$('dlc-toast').style.display='none'}
 function alertNew(){var r=role(),sn=seen(),o=msgs.filter(function(m){return m.from!==r&&m.id>sn&&!m.alert}).pop();if(!o)return;
 var t=$('dlc-toast');t.textContent='\uD83D\uDCAC '+label(o.from)+': '+o.text.slice(0,70);t.style.display='block';clearTimeout(toastT);toastT=setTimeout(hideToast,7000);buzz([120,60,120]);
@@ -1212,6 +1213,7 @@ $('dlc-btn').addEventListener('click',openP);
 $('dlc-toast').addEventListener('click',openP);
 $('dlc-x').addEventListener('click',closeP);
 $('dlc-a-ok').addEventListener('click',ack);
+$('dlc-clear').addEventListener('click',function(){if(!confirm('Delete ALL messages for both of you?'))return;fetch(API,{method:'POST',headers:hdr(),body:JSON.stringify({clear:true,from:'daddy'})}).then(function(r){return r.ok?r.json():Promise.reject()}).then(function(){msgs=[];s('__dl_chat_seen','0');prevUnread=0;render(true);badge()}).catch(function(){alert('Could not clear. Try again.')})});
 $('dlc-who').addEventListener('click',function(){s('__dl_role','');ui();render(true);badge()});
 $('dlc-send').addEventListener('click',function(){send(false)});
 $('dlc-alertbtn').addEventListener('click',function(){send(true)});
