@@ -27,7 +27,7 @@ Storage.prototype.removeItem=function(k){_rem.call(this,k);if(this===ls)touch(k)
 var dirty=ls.getItem('__dl_dirty')==='1',r=pullSync();
 if(r){ver=r.version||0;
 if(r.data&&!dirty){apply(r.data);base=norm(snap())}else{pushSync()}}
-function poll(){if(document.visibilityState!=='visible'||timer||ls.getItem('__dl_dirty')==='1'||Date.now()-lastTouch<3000)return;
+function poll(){if(document.visibilityState!=='visible'||timer||ls.getItem('__dl_dirty')==='1'||Date.now()-lastTouch<3000||window.__dlChatOpen)return;
 getRemote().then(function(j){if(j&&j.data&&j.version>ver&&!timer&&Date.now()-lastTouch>=3000)location.reload()}).catch(function(){})}
 setInterval(poll,4000);
 ['pointerdown','touchstart','touchmove','keydown'].forEach(function(e){document.addEventListener(e,function(){lastTouch=Date.now()},true)});
@@ -1127,6 +1127,99 @@ m.querySelector('.cm-yes').addEventListener('click',function(){
   navigator.vibrate&&navigator.vibrate(12);
 });
 m.addEventListener('click',function(e){if(e.target===m){target=null;hide();}});
+})();
+</script>
+<script>
+(function(){
+var API='/api/chat',msgs=[],isOpen=false,alertUp=false,tick=0,prevUnread=0,baseTitle=document.title,toastT=null,alertIv=null,titleIv=null,alertId=0,ac=null;
+function g(k){try{return localStorage.getItem(k)||''}catch(e){return ''}}
+function s(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function hdr(){var h={'content-type':'application/json'},t=g('__dl_token');if(t)h['x-sync-token']=t;return h}
+function $(i){return document.getElementById(i)}
+try{var q=location.search;if(/[?&]daddy\b/.test(q))s('__dl_role','daddy');if(/[?&]her\b/.test(q))s('__dl_role','');if(/[?&](daddy|her)\b/.test(q))history.replaceState(null,'',location.pathname)}catch(e){}
+var css=document.createElement('style');
+css.textContent=`
+#dlc-btn{position:fixed;right:14px;bottom:calc(env(safe-area-inset-bottom,0px) + 14px);width:48px;height:48px;border-radius:50%;border:1px solid #4fb396;background:#0b1512;color:#fff;font-size:22px;z-index:2147483000;display:flex;align-items:center;justify-content:center;opacity:.92;padding:0}
+#dlc-badge{position:absolute;top:-4px;right:-4px;min-width:20px;height:20px;border-radius:10px;background:#e0443c;color:#fff;font:700 12px/20px monospace;display:none;align-items:center;justify-content:center;padding:0 5px;font-style:normal}
+#dlc-toast{position:fixed;left:12px;right:12px;top:calc(env(safe-area-inset-top,0px) + 10px);background:#0b1512;border:1px solid #4fb396;color:#fff;font:600 15px monospace;padding:12px 14px;border-radius:12px;z-index:2147483001;display:none}
+#dlc-panel{position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;background:#0a0d12;color:#fff;z-index:2147483002;display:none;flex-direction:column;font-family:ui-monospace,Menlo,monospace;padding-top:env(safe-area-inset-top,0px);box-sizing:border-box}
+#dlc-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #1d2a26}
+#dlc-head b{color:#4fb396;font-size:16px}
+#dlc-who{flex:1;text-align:right;font-size:12px;color:#e0443c;text-decoration:underline}
+#dlc-x{background:none;border:0;color:#fff;font-size:20px;padding:4px 8px}
+#dlc-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;gap:8px;padding:12px 14px}
+.dlc-empty{margin:auto;color:#8a98a0;font-size:14px}
+.dlc-m{max-width:80%;padding:9px 12px;border-radius:14px;font-size:15px;line-height:1.35;word-wrap:break-word;overflow-wrap:anywhere;-webkit-user-select:text;user-select:text}
+.dlc-m small{display:block;margin-top:3px;font-size:10px;opacity:.7}
+.dlc-m.me{align-self:flex-end;background:#2f7f69;border-bottom-right-radius:4px}
+.dlc-m.them{align-self:flex-start;background:#3a1f22;border:1px solid #6b2b30;border-bottom-left-radius:4px}
+.dlc-m.al{border:2px solid #ff3b3b;background:#5a0f14}
+#dlc-form{display:flex;gap:8px;padding:10px 12px calc(env(safe-area-inset-bottom,0px) + 10px);border-top:1px solid #1d2a26}
+#dlc-in{flex:1;min-width:0;background:#10161c;border:1px solid #2a3a36;border-radius:12px;color:#fff;font-size:16px;padding:11px 12px;-webkit-user-select:text;user-select:text;outline:none}
+#dlc-send,#dlc-alertbtn{border:0;border-radius:12px;font:700 15px monospace;padding:0 14px}
+#dlc-send{background:#4fb396;color:#04110d}
+#dlc-alertbtn{display:none;background:#e0443c;color:#fff}
+#dlc-send:disabled,#dlc-alertbtn:disabled{opacity:.5}
+#dlc-alert{position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;z-index:2147483003;display:none;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;animation:dlcp .9s ease-in-out infinite alternate;overflow-y:auto}
+@keyframes dlcp{from{background:#4a0810}to{background:#a3121c}}
+.dlc-a-in{text-align:center;color:#fff;max-width:520px;width:100%}
+.dlc-a-top{font:800 15px monospace;letter-spacing:2px;margin-bottom:18px}
+#dlc-a-text p{font:800 28px/1.25 system-ui,sans-serif;margin:0 0 16px;overflow-wrap:anywhere}
+#dlc-a-ok{margin-top:18px;width:100%;padding:18px;border-radius:16px;border:0;background:#fff;color:#a3121c;font:800 20px system-ui,sans-serif}`;
+document.head.appendChild(css);
+var root=document.createElement('div');
+root.innerHTML='<button id="dlc-btn" aria-label="Messages">\uD83D\uDCAC<i id="dlc-badge"></i></button><div id="dlc-toast"></div><div id="dlc-panel"><div id="dlc-head"><b id="dlc-title">Daddy \u2764</b><span id="dlc-who"></span><button id="dlc-x" aria-label="Close">\u2715</button></div><div id="dlc-list"></div><div id="dlc-form"><input id="dlc-in" type="text" placeholder="Type a message..." autocomplete="off" enterkeyhint="send"><button id="dlc-alertbtn">\uD83D\uDEA8 Alert</button><button id="dlc-send">Send</button></div></div><div id="dlc-alert"><div class="dlc-a-in"><div class="dlc-a-top">\uD83D\uDEA8 MESSAGE FROM DADDY \uD83D\uDEA8</div><div id="dlc-a-text"></div><button id="dlc-a-ok">Got it \u2764</button></div></div>';
+document.body.appendChild(root);
+['touchstart','touchmove','touchend','pointerdown','pointerup','mousedown','mouseup','click','keydown','keyup','contextmenu'].forEach(function(e){['dlc-btn','dlc-panel','dlc-toast','dlc-alert'].forEach(function(id){$(id).addEventListener(e,function(ev){ev.stopPropagation()})})});
+function unlock(){try{if(!ac){var C=window.AudioContext||window.webkitAudioContext;if(C)ac=new C()}if(ac&&ac.state==='suspended')ac.resume()}catch(e){}}
+['touchstart','pointerdown','click'].forEach(function(e){document.addEventListener(e,unlock,{capture:true,passive:true})});
+function beep(){if(!ac)return;try{var t=ac.currentTime;[0,.25,.5].forEach(function(d){var o=ac.createOscillator(),gn=ac.createGain();o.type='square';o.frequency.value=880;gn.gain.value=.15;o.connect(gn);gn.connect(ac.destination);o.start(t+d);o.stop(t+d+.15)})}catch(e){}}
+function buzz(p){try{if(navigator.vibrate)navigator.vibrate(p)}catch(e){}}
+function busy(){window.__dlChatOpen=isOpen||alertUp}
+function role(){return g('__dl_role')==='daddy'?'daddy':'lovey'}
+function label(r){return r==='daddy'?'Daddy':'Lovey'}
+function seen(){return parseInt(g('__dl_chat_seen')||'0',10)||0}
+function unread(){var r=role(),sn=seen();return msgs.filter(function(m){return m.from!==r&&m.id>sn}).length}
+function markSeen(){if(msgs.length)s('__dl_chat_seen',String(msgs[msgs.length-1].id))}
+function fmt(id){var d=new Date(id),h=d.getHours(),m=d.getMinutes();return (h%12||12)+':'+(m<10?'0':'')+m+(h<12?'am':'pm')}
+function badge(){var u=unread(),b=$('dlc-badge');b.textContent=u>9?'9+':u;b.style.display=u?'flex':'none';if(!alertUp)document.title=u?'\uD83D\uDCAC ('+u+') '+baseTitle:baseTitle}
+function render(stick){var L=$('dlc-list'),near=L.scrollHeight-L.scrollTop-L.clientHeight<80,r=role();L.textContent='';
+if(!msgs.length){var e=document.createElement('div');e.className='dlc-empty';e.textContent='No messages yet.';L.appendChild(e)}
+msgs.forEach(function(m){var mine=m.from===r,d=document.createElement('div');d.className='dlc-m '+(mine?'me':'them')+(m.alert?' al':'');var t=document.createElement('div');t.textContent=(m.alert?'\uD83D\uDEA8 ':'')+m.text;var tm=document.createElement('small');
+var meta=(mine?'':label(m.from)+' \u00B7 ')+fmt(m.id);if(m.alert&&mine)meta+=m.ackAt?' \u00B7 \u2713 seen '+fmt(m.ackAt):' \u00B7 not seen yet';tm.textContent=meta;d.appendChild(t);d.appendChild(tm);L.appendChild(d)});
+if(stick||near)L.scrollTop=L.scrollHeight}
+function ui(){var a=role()==='daddy';$('dlc-alertbtn').style.display=a?'block':'none';$('dlc-who').textContent=a?'ADMIN \u00B7 tap for her view':'';$('dlc-title').textContent=a?'Messages':'Daddy \u2764'}
+function hideToast(){$('dlc-toast').style.display='none'}
+function alertNew(){var r=role(),sn=seen(),o=msgs.filter(function(m){return m.from!==r&&m.id>sn&&!m.alert}).pop();if(!o)return;
+var t=$('dlc-toast');t.textContent='\uD83D\uDCAC '+label(o.from)+': '+o.text.slice(0,70);t.style.display='block';clearTimeout(toastT);toastT=setTimeout(hideToast,7000);buzz([120,60,120]);
+if(document.hidden&&window.Notification&&Notification.permission==='granted'){try{new Notification(label(o.from),{body:o.text})}catch(e){}}}
+function showAlert(list){var latest=list[list.length-1].id,A=$('dlc-a-text');A.textContent='';list.slice(-3).reverse().forEach(function(m){var p=document.createElement('p');p.textContent=m.text;A.appendChild(p)});
+$('dlc-alert').style.display='flex';
+if(!alertUp||latest!==alertId){alertId=latest;beep();buzz([300,100,300,100,300]);
+if(document.hidden&&window.Notification&&Notification.permission==='granted'){try{new Notification('\uD83D\uDEA8 Daddy',{body:list[list.length-1].text,requireInteraction:true})}catch(e){}}}
+if(!alertUp){alertUp=true;busy();clearInterval(alertIv);alertIv=setInterval(function(){beep();buzz([300,100,300,100,300])},4000);clearInterval(titleIv);var f=false;titleIv=setInterval(function(){f=!f;document.title=f?'\uD83D\uDEA8 DADDY':baseTitle},900)}}
+function hideAlert(){if(!alertUp)return;alertUp=false;alertId=0;$('dlc-alert').style.display='none';clearInterval(alertIv);clearInterval(titleIv);busy();badge()}
+function fetchMsgs(){fetch(API+'?t='+Date.now(),{headers:hdr(),cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(j){if(!j||!j.messages)return;msgs=j.messages;
+var pend=role()==='lovey'?msgs.filter(function(m){return m.alert&&!m.ackAt}):[];if(pend.length)showAlert(pend);else hideAlert();
+if(isOpen){markSeen();render(false)}var u=unread();if(u>prevUnread&&!isOpen&&!alertUp)alertNew();prevUnread=u;badge()}).catch(function(){})}
+function ack(){var b=$('dlc-a-ok');b.disabled=true;fetch(API,{method:'POST',headers:hdr(),body:JSON.stringify({ack:true})}).then(function(r){return r.ok?r.json():Promise.reject()}).then(function(j){if(j&&j.messages)msgs=j.messages;hideAlert();markSeen();badge();if(isOpen)render(false)}).catch(function(){}).then(function(){b.disabled=false})}
+function openP(){isOpen=true;busy();$('dlc-panel').style.display='flex';ui();markSeen();render(true);prevUnread=0;badge();hideToast();
+if(window.Notification&&Notification.permission==='default'){try{Notification.requestPermission()}catch(e){}}}
+function closeP(){isOpen=false;busy();$('dlc-panel').style.display='none'}
+function send(isAlert){var r=role(),i=$('dlc-in'),t=i.value.trim();if(!t)return;var b=$(isAlert?'dlc-alertbtn':'dlc-send'),old=b.textContent;b.disabled=true;
+fetch(API,{method:'POST',headers:hdr(),body:JSON.stringify({from:r,text:t,alert:!!isAlert})}).then(function(x){return x.ok?x.json():Promise.reject()}).then(function(m){i.value='';msgs.push(m);markSeen();render(true);badge()}).catch(function(){b.textContent='Retry'}).then(function(){b.disabled=false;setTimeout(function(){b.textContent=old},1500)})}
+$('dlc-btn').addEventListener('click',openP);
+$('dlc-toast').addEventListener('click',openP);
+$('dlc-x').addEventListener('click',closeP);
+$('dlc-a-ok').addEventListener('click',ack);
+$('dlc-who').addEventListener('click',function(){s('__dl_role','');ui();render(true);badge()});
+$('dlc-send').addEventListener('click',function(){send(false)});
+$('dlc-alertbtn').addEventListener('click',function(){send(true)});
+$('dlc-in').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();send(false)}});
+ui();
+setInterval(function(){tick++;if(document.visibilityState!=='visible')return;fetchMsgs()},3000);
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')fetchMsgs()});
+fetchMsgs();
 })();
 </script>
 </body></html>
