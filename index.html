@@ -6,28 +6,27 @@ function tok(){return ls.getItem('__dl_token')||''}
 function hdrs(){var h={'content-type':'application/json'};if(tok())h['x-sync-token']=tok();return h}
 function synced(k){return k&&k.indexOf(P)===0&&!SKIP.test(k)}
 function snap(){var o={};for(var i=0;i<ls.length;i++){var k=ls.key(i);if(synced(k))o[k]=ls.getItem(k)}return o}
+function norm(o){var c={};for(var k in o)c[k]=o[k];var L=c['daddys-list-live'];if(L){try{var p=JSON.parse(L);if(p&&p.snap)delete p.snap.savedAt;c['daddys-list-live']=JSON.stringify(p)}catch(e){}}return JSON.stringify(c)}
 function apply(d){var del=[];for(var i=0;i<ls.length;i++){var k=ls.key(i);if(synced(k)&&!(k in d))del.push(k)}
 del.forEach(function(k){_rem.call(ls,k)});for(var k in d)_set.call(ls,k,d[k])}
 function pullSync(){try{var x=new XMLHttpRequest();x.open('GET',API+'?t='+Date.now(),false);if(tok())x.setRequestHeader('x-sync-token',tok());x.send();
 if(x.status===401){var t=prompt('Enter your daddys-list sync passcode');if(t){_set.call(ls,'__dl_token',t);return pullSync()}return null}
 if(x.status===200)return JSON.parse(x.responseText)}catch(e){}return null}
 function pushSync(){try{var x=new XMLHttpRequest();x.open('PUT',API,false);x.setRequestHeader('content-type','application/json');if(tok())x.setRequestHeader('x-sync-token',tok());
-var s=snap();x.send(JSON.stringify({data:s}));if(x.status===200){ver=JSON.parse(x.responseText).version;base=JSON.stringify(s);_set.call(ls,'__dl_dirty','0')}}catch(e){}}
+var s=snap();x.send(JSON.stringify({data:s}));if(x.status===200){ver=JSON.parse(x.responseText).version;base=norm(s);_set.call(ls,'__dl_dirty','0')}}catch(e){}}
 function getRemote(){return fetch(API+'?t='+Date.now(),{headers:hdrs(),cache:'no-store'}).then(function(r){return r.ok?r.json():null})}
-function put(){var s=snap(),js=JSON.stringify(s);if(js===base){if(!timer)_set.call(ls,'__dl_dirty','0');return Promise.resolve()}
+function put(){var s=snap(),js=norm(s);if(js===base){if(!timer)_set.call(ls,'__dl_dirty','0');return Promise.resolve()}
 return fetch(API,{method:'PUT',headers:hdrs(),body:JSON.stringify({data:s}),keepalive:true}).then(function(r){return r.ok?r.json():Promise.reject()})
 .then(function(j){ver=j.version;base=js;if(!timer)_set.call(ls,'__dl_dirty','0')})}
 function push(force){timer=null;
 if(force===true)return put().catch(function(){});
-getRemote().then(function(j){
-if(j&&j.data&&j.version>ver){_set.call(ls,'__dl_dirty','0');location.reload();return}
-return put()}).catch(function(){})}
-function touch(k){if(!synced(k))return;_set.call(ls,'__dl_dirty','1');clearTimeout(timer);timer=setTimeout(push,300)}
+put().catch(function(){})}
+function touch(k){if(!synced(k))return;if(norm(snap())===base)return;_set.call(ls,'__dl_dirty','1');clearTimeout(timer);timer=setTimeout(push,300)}
 Storage.prototype.setItem=function(k,v){_set.call(this,k,v);if(this===ls)touch(k)};
 Storage.prototype.removeItem=function(k){_rem.call(this,k);if(this===ls)touch(k)};
 var dirty=ls.getItem('__dl_dirty')==='1',r=pullSync();
 if(r){ver=r.version||0;
-if(r.data&&!dirty){apply(r.data);base=JSON.stringify(snap())}else{pushSync()}}
+if(r.data&&!dirty){apply(r.data);base=norm(snap())}else{pushSync()}}
 function poll(){if(document.visibilityState!=='visible'||timer||ls.getItem('__dl_dirty')==='1'||Date.now()-lastTouch<3000)return;
 getRemote().then(function(j){if(j&&j.data&&j.version>ver&&!timer&&Date.now()-lastTouch>=3000)location.reload()}).catch(function(){})}
 setInterval(poll,4000);
