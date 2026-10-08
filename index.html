@@ -1994,5 +1994,61 @@ setInterval(flag,1500);flag();
 if(!g(SEEN))setTimeout(function(){if(!g(SEEN))showW()},1200);
 })();
 </script>
+<style id="desktop-fit">
+/* Desktop (laptop) layout: left column is a fixed ~460px, so size its text for that width, not the viewport. */
+@media(min-width:860px) and (min-height:521px){
+.board{grid-template-rows:minmax(58px,1.5fr) minmax(48px,1.4fr) minmax(0,18.65fr)}
+.board .header{font-size:13px}
+.board .nutrition-bar{font-size:13.5px}
+.board .nutrition-bar.text-shrink{font-size:12px}
+.board .dayplan-label{font-size:14px}
+.board .grid .time{font-size:17px}
+.board .grid .cell{font-size:15px}
+/* keep the NEW badge clear of the TOTAL POINTS label */
+.board .vital-stat.rw-flag{padding-right:21px}
+.board .vital-stat.rw-flag::after,.board .vital-stat.rw-flag .rw-nt{top:4px;right:4px}
+}
+</style>
+<style id="fx-welcome-css">
+/* One-time "everything's fixed" notice. Same look as the Rewards welcome. */
+#fx-w{position:fixed;inset:0;z-index:2147483000;display:none;align-items:center;justify-content:center;padding:22px;box-sizing:border-box;background:rgba(0,0,0,.82);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);touch-action:manipulation}
+#fx-w.show{display:flex}
+#fx-w .fx-card{width:100%;max-width:340px;max-height:100%;overflow-y:auto;box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #f40f4f;border-radius:16px;padding:24px 20px 18px;text-align:center;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 0 40px rgba(244,15,79,.35)}
+#fx-w h2{margin:0 0 4px;font-size:26px;font-weight:800;color:#fff}
+#fx-w .fx-sub{margin:0 0 16px;font-size:15px;color:#ff8fa8;font-weight:700}
+#fx-w .fx-pt{text-align:left;margin:0 0 12px;padding:12px;border-radius:12px;background:#150a1d;font-size:15.5px;line-height:1.45}
+#fx-w .fx-pt b{display:block;font-size:16px;margin-bottom:2px}
+#fx-w .fx-pt.good{border:1.5px solid #00a88f;background:rgba(0,168,143,.1)}
+#fx-w .fx-note{margin:4px 0 0;font-size:14px;color:#ff8fa8;font-weight:600}
+#fx-w button{display:block;width:100%;padding:14px 10px;border:0;border-radius:12px;font:inherit;font-size:17px;font-weight:800;cursor:pointer;background:#00a88f;color:#fff;margin-top:16px}
+</style>
+<div id="fx-w" role="dialog" aria-modal="true" aria-labelledby="fx-wt"><div class="fx-card">
+<h2 id="fx-wt">Stability update</h2>
+<p class="fx-sub">Hoping it's better now</p>
+<div class="fx-pt"><b>1. Your points should be safe</b>Nothing was deleted. The laptop just couldn't load or save them.</div>
+<div class="fx-pt good"><b>2. Saving should work again</b>I put a lot of work into this. Check things off on your laptop and hopefully they stay put after you refresh, and show up on your phone too.</div>
+<div class="fx-pt"><b>3. Fingers crossed it fits</b>I tried to make the layout look right on any laptop, even when you resize the window.</div>
+<p class="fx-note">Still looks off? Let me know.</p>
+<button type="button" class="fx-go">Got it</button>
+</div></div>
+<script>
+(function(){
+/* Per-device flag (not prefixed daddys-list, so it never syncs): each device sees this once. Add ?fixednotice to the address to replay it. */
+var SEEN='dl-fixed-welcome-v1',w=document.getElementById('fx-w');
+function g(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function s(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+try{if(/[?&]fixednotice\b/.test(location.search))localStorage.removeItem(SEEN)}catch(e){}
+function busy(){var a=document.getElementById('rw-w'),b=document.getElementById('rw-ov');return (a&&a.classList.contains('show'))||(b&&b.classList.contains('show'))}
+function show(){w.classList.add('show');window.__dlChatOpen=true}
+function hide(){w.classList.remove('show');s(SEEN,'1');if(!busy())window.__dlChatOpen=false}
+w.querySelector('.fx-go').addEventListener('click',hide);
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&w.classList.contains('show'))hide()});
+if(!g(SEEN)){setTimeout(function(){
+  if(g(SEEN))return;
+  /* If the Rewards welcome is up, wait for it to be dismissed first so the two never stack. */
+  (function wait(){if(g(SEEN))return;if(busy()){setTimeout(wait,500)}else{show()}})();
+},1600)}
+})();
+</script>
 </body></html>
 <script async src="/.netlify/scripts/hud?variant=public" data-nf-variant="public" data-netlify-site-id="368db1d5-4772-432e-b80f-c68ae30a2700" data-app-host="app.netlify.com"></script>
