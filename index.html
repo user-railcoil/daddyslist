@@ -2034,7 +2034,7 @@ if(!g(SEEN))setTimeout(function(){if(!g(SEEN))showW()},1200);
 <script>
 (function(){
 /* Per-device flag (not prefixed daddys-list, so it never syncs): each device sees this once. Add ?fixednotice to the address to replay it. */
-var SEEN='dl-fixed-welcome-v1',w=document.getElementById('fx-w');
+var SEEN='dl-stability-update-v1',w=document.getElementById('fx-w');
 function g(k){try{return localStorage.getItem(k)}catch(e){return null}}
 function s(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 try{if(/[?&]fixednotice\b/.test(location.search))localStorage.removeItem(SEEN)}catch(e){}
