@@ -1497,6 +1497,13 @@ function dayKey(){try{if(window.__dlDayKey)return window.__dlDayKey();if(typeof 
 function bonusToday(){load();var k=dayKey(),n=0;for(var x in st){if(st[x]&&st[x].w&&st[x].d===k&&ITEMS[x]&&ITEMS[x].w===0)n++}return n*3}
 (function(){var o=window.__ptsToday;if(typeof o==='function'&&!o.__mc){var f=function(){return o()+bonusToday()};f.__mc=1;window.__ptsToday=f}})();
 var EPK='daddys-list-movies-ep';
+var ATK='daddys-list-movies-at';
+function atAll(){try{return JSON.parse(localStorage.getItem(ATK)||'{}')||{}}catch(e){return {}}}
+function atGet(i){var v=atAll()[i];return typeof v==='number'&&v>0?v:0}
+function atSet(i,sec){var o=atAll();if(sec>0)o[i]=sec;else delete o[i];try{localStorage.setItem(ATK,JSON.stringify(o))}catch(e){}}
+function atFmt(n){n=n||0;var h=Math.floor(n/3600),m=Math.floor(n%3600/60),x=n%60;return h?h+':'+String(m).padStart(2,'0')+':'+String(x).padStart(2,'0'):m+':'+String(x).padStart(2,'0')}
+/* [S0L] RESUME TIME (Oct 13, 2026): set with three sliders (hours 0-6, minutes 0-59, seconds 0-59), saved with the SAVE button. Stored in seconds in daddys-list-movies-at {itemIndex:seconds}; shows as RESUME AT under the title and in the admin export. */
+function atRead(box){var n=0;[].forEach.call(box.querySelectorAll('.mc-at-rg'),function(r){n+=parseInt(r.value,10)*parseInt(r.dataset.mul,10)});return n}
 function epAll(){try{return JSON.parse(localStorage.getItem(EPK)||'{}')||{}}catch(e){return {}}}
 function epGet(i){var o=epAll();return o[i]!=null?o[i]:(ITEMS[i].ep0||1)}
 function epSet(i,n){var o=epAll();o[i]=Math.max(1,n);try{localStorage.setItem(EPK,JSON.stringify(o))}catch(e){}}
@@ -1602,6 +1609,9 @@ css.textContent=
 +'@media(orientation:landscape) and (max-height:520px){.mc-info b{padding:8px 12px}.mc-cats button{min-height:36px}.mc-tabs button{min-height:46px;gap:2px}.mc-tabs button b{font-size:16px}.mc-key .g{height:28px}.mc-banner{padding:7px 12px}.mc-era{padding:10px 12px}.mc-blk{padding:7px 12px}.mc-row{min-height:54px}.mc-name{padding:8px 12px}.mc-pane .mc-letters button{height:50px}.mc-mods button,.mc-move button{height:44px}}'
 +'.mc-info{background:var(--done-solid)!important;color:var(--done-txt)}.mc-info .mc-pts{background:transparent;color:var(--done-txt);padding:0 6px 0 18px;font-size:20px}.mc-info b{color:var(--done-txt);font-size:13px;letter-spacing:.12em;padding-left:10px}.mc-info .mc-x{background:transparent;color:var(--done-txt);border-left:var(--sep-thickness) solid rgba(0,0,0,.2)}.mc-info .mc-x:active{background:rgba(0,0,0,.18);color:var(--done-txt)}'
 +'.mc-banner{background:var(--done-solid)!important;color:var(--done-txt)!important;font-weight:800}'
++'.mc-at{border-bottom:var(--sep-thickness) solid var(--grid-lines)}.mc-at-top{display:flex;align-items:stretch;border-bottom:var(--sep-thickness) solid var(--grid-lines)}.mc-at-top span{flex:0 0 auto;display:flex;align-items:center;padding:0 12px;font-size:11px;font-weight:800;letter-spacing:.1em;color:var(--txt-t3)}.mc-at-top b{flex:1 1 auto;display:flex;align-items:center;justify-content:center;height:50px;font-size:24px;font-weight:900;color:var(--txt-t2);background:var(--bg-t2)}.mc-at-top button{flex:0 0 auto;min-width:72px;margin:0;padding:0 12px;border:0;border-left:var(--sep-thickness) solid var(--grid-lines);border-radius:0;background:var(--done-solid);color:var(--done-txt);font:inherit;font-size:12px;font-weight:900;letter-spacing:.1em;touch-action:manipulation}.mc-at-top button[data-at="clear"]{background:var(--bg-t5);color:var(--dd-accent)}'
++'.mc-at-r{display:flex;align-items:center;gap:10px;padding:2px 14px;min-height:46px}.mc-at-r span{flex:0 0 34px;font-size:11px;font-weight:800;letter-spacing:.1em;color:var(--txt-t3)}.mc-at-r b{flex:0 0 2.2em;text-align:right;font-size:18px;font-weight:900;color:var(--txt-t2)}.mc-list .mc-at-rg{flex:1 1 auto;min-width:0;height:40px;margin:0;touch-action:none;accent-color:var(--done-solid);-webkit-appearance:auto;appearance:auto}.mc-note{padding:10px 12px;font-size:12px;font-weight:700;line-height:1.3;color:var(--dd-accent);border-bottom:var(--sep-thickness) solid var(--grid-lines)}'
++'.mc-rate.mc-q{min-width:78px;margin:0;border-radius:0;background:var(--done-solid);color:var(--done-txt);font:inherit;font-size:10.5px;font-weight:900;letter-spacing:.06em;line-height:1.15;text-align:center;touch-action:manipulation;-webkit-tap-highlight-color:transparent}.mc-rate.mc-q:active{filter:brightness(1.25)}'
 +'.mc-info .mc-exp{flex:0 0 auto;margin:0;padding:0 12px;border:0;border-left:var(--sep-thickness) solid rgba(0,0,0,.2);border-radius:0;background:rgba(0,0,0,.22);color:var(--done-txt);font:inherit;font-size:12px;font-weight:900;letter-spacing:.1em;touch-action:manipulation}';
 document.head.appendChild(css);
 
@@ -1616,7 +1626,7 @@ function mcText(){
   var ep=it.ep;if(stat(i)==='u'&&it.ep&&!e.w)ep=null;
   if(ep)s+=' — '+ep;
   if(it.st)s+=(ep?' ':'')+'(STOPPED)';
-  if(it.ar)s+='(ARGUMENT)';
+  if(it.ar)s+='(ARGUMENT)';if(atGet(i))s+='(AT '+atFmt(atGet(i))+')';
   if(rated)s+='[ '+(e.r||'?')+(it.tight?'':' ')+']';return s}
  function section(title,test,rated){
   var idx=[];for(var i=0;i<ITEMS.length;i++){if(!ITEMS[i].c&&test(i))idx.push(i)}
@@ -1671,13 +1681,14 @@ function mcHTML(){
   if(it.e!==lastE){h+='<div class="mc-era">'+esc(it.e)+'</div>';lastE=it.e;lastB=null}
   if(it.b!==lastB){h+='<div class="mc-blk '+(it.b.indexOf('DC')===0?'dc':'')+'">'+esc(it.b)+'</div>';lastB=it.b}
   var sub=[];if(it.y)sub.push(it.y);if(it.ep)sub.push(it.ep);
-  var subh=esc(sub.join(' · '))+(it.st&&!st[i]?' · <em>STOPPED</em>':'');
+  var subh=esc(sub.join(' · '))+(it.st&&!st[i]?' · <em>STOPPED</em>':'')+(it.ar?' · <em>ARGUMENT</em>':'')+(atGet(i)?' · <em>RESUME AT '+atFmt(atGet(i))+'</em>':'');
   var right=(e.w&&e.r)?'<span class="g g-'+e.r.charAt(0)+'">'+esc(e.r)+'</span>':'<span class="mc-rate">RATE</span>';
   if((it.wip||(stat(i)==='u'&&it.ep))&&!e.w)right='<span class="mc-step"><button type="button" data-ep="-1">&minus;</button><b>EP '+epGet(i)+'</b><button type="button" data-ep="1">+</button></span>';
+  if(localStorage.getItem('__dl_role')==='daddy'&&TABK[tab]==='u'&&right.indexOf('mc-step')<0)right='<button type="button" class="mc-rate mc-q" data-mv="t" aria-label="Move back to To Watch">&#8617; TO WATCH</button>';
   h+='<div class="mc-item'+(openId===i?' open':'')+'" data-i="'+i+'"><div class="mc-row"><span class="mc-type">'+esc(it.t)+'</span><div class="mc-name">'+esc(it.n)+'<small>'+subh+'</small></div>'+right+'</div>';
   if(openId===i){
    var cl=e.r.charAt(0),sk=inU(i)?'u':stat(i);
-   h+='<div class="mc-panel"><div class="mc-letters">'+GR.map(function(g){return '<button type="button" data-g="'+g+'" class="g g-'+g+(cl===g?' cur':'')+'">'+g+'</button>'}).join('')+'</div>'
+   h+='<div class="mc-panel">'+(it.ar?'<div class="mc-note">An argument happened during this one, so your rating may be affected.</div>':'')+(stat(i)==='t'?'<div class="mc-at"><div class="mc-at-top"><span>RESUME AT</span><b class="mc-at-val">'+atFmt(atGet(i))+'</b><button type="button" data-at="save">SAVE</button>'+(atGet(i)?'<button type="button" data-at="clear">CLEAR</button>':'')+'</div>'+[['h','HR',6,3600],['m','MIN',59,60],['s','SEC',59,1]].map(function(u){var v=u[0]==='h'?Math.floor(atGet(i)/3600):u[0]==='m'?Math.floor(atGet(i)%3600/60):atGet(i)%60;return '<div class="mc-at-r"><span>'+u[1]+'</span><input type="range" class="mc-at-rg" data-u="'+u[0]+'" data-mul="'+u[3]+'" min="0" max="'+u[2]+'" step="1" value="'+v+'" aria-label="'+u[1]+'"><b>'+v+'</b></div>'}).join('')+'</div>':'')+'<div class="mc-letters">'+GR.map(function(g){return '<button type="button" data-g="'+g+'" class="g g-'+g+(cl===g?' cur':'')+'">'+g+'</button>'}).join('')+'</div>'
     +'<div class="mc-mods"><button type="button" data-m="-" class="'+(panelMod==='-'?'cur':'')+'">&minus;</button><button type="button" data-m="" class="'+(panelMod===''?'cur':'')+'">plain</button><button type="button" data-m="+" class="'+(panelMod==='+'?'cur':'')+'">+</button></div>'
     +'<div class="mc-move">'+[['t','TO WATCH'],['u','UNFINISHED']].map(function(m){return '<button type="button" data-mv="'+m[0]+'" class="'+(sk===m[0]?'cur':'')+'">'+m[1]+'</button>'}).join('')+'</div></div>';
   }
@@ -1717,6 +1728,9 @@ function mcClick(e){
  if(b&&b.dataset.tab!==undefined){tab=parseInt(b.dataset.tab,10);openId=-1;mcRender();var l=document.querySelector('#mc-pane .mc-list');if(l)l.scrollTop=0;return}
  if(b&&b.dataset.x){var tf=(function(){var a=document.querySelectorAll('.grid form.is-tea');for(var k=0;k<a.length;k++){var q=a[k].querySelector('.chk-prog');if(q&&q.checked)return a[k]}return a[0]||null})(),pc=tf&&tf.querySelector('.chk-prog'),dc=tf&&tf.querySelector('.chk-done'),lb=tf&&tf.querySelector('.click-prog');if(lb&&pc&&pc.checked&&!(dc&&dc.checked)&&tf.dataset.ovDismissed!=='1')lb.click();return}
  if(b&&b.dataset.exp){mcxOpen();return}
+ if(b&&b.dataset.at){var ai=parseInt(t.closest('.mc-item').dataset.i,10);
+  if(b.dataset.at==='clear'){atSet(ai,0);mcRender();return}
+  atSet(ai,atRead(t.closest('.mc-item')));mcRender();return}
  if(b&&b.dataset.undo){if(undo){if(undo.prev)st[undo.i]=undo.prev;else delete st[undo.i];save();undo=null;openId=-1;mcRender()}return}
  if(!it)return;
  var i=parseInt(it.dataset.i,10),e0=eff(i);
@@ -1812,6 +1826,7 @@ function mcBuild(){
  var rc=o.querySelector('.rail-card-title');if(rc)rc.textContent='Motion Comics';
  var p=document.createElement('div');p.id='mc-pane';p.className='mc-pane';o.appendChild(p);
  p.addEventListener('click',mcClick);
+ p.addEventListener('input',function(e){var r=e.target;if(!r.classList||!r.classList.contains('mc-at-rg'))return;var row=r.closest('.mc-at-r');if(row)row.querySelector('b').textContent=r.value;var box=r.closest('.mc-at'),v=box.querySelector('.mc-at-val'),n=atRead(box);if(v)v.textContent=atFmt(n)});
  mcRender();
 }
 function build(){mcBuild();pbSync()}
@@ -2603,6 +2618,51 @@ if(!g(SEEN)&&(force||g('__dl_role')!=='daddy')){
     if(g(SEEN)){clearInterval(iv);return}
     if(w.classList.contains('show')||window.__dlChatOpen===true||Date.now()-started<1500)return;
     if(document.visibilityState==='hidden')return;
+    clearInterval(iv);show();
+  },400);
+}
+})();
+</script>
+<style>
+/* One-time "resume time" notice (her side). Same look as the other update cards. */
+#rs-w{position:fixed;inset:0;z-index:2147483000;display:none;align-items:center;justify-content:center;padding:22px;box-sizing:border-box;background:rgba(0,0,0,.82);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);touch-action:manipulation}
+#rs-w.show{display:flex}
+#rs-w .rs-card{width:100%;max-width:340px;max-height:100%;overflow-y:auto;box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #f40f4f;border-radius:16px;padding:24px 20px 18px;text-align:center;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 0 40px rgba(244,15,79,.35)}
+#rs-w h2{margin:0 0 4px;font-size:26px;font-weight:800;color:#fff}
+#rs-w .rs-sub{margin:0 0 16px;font-size:15px;color:#ff8fa8;font-weight:700}
+#rs-w .rs-pt{text-align:left;margin:0 0 12px;padding:12px;border-radius:12px;background:#150a1d;font-size:15.5px;line-height:1.45}
+#rs-w .rs-pt b{display:block;font-size:16px;margin-bottom:2px}
+#rs-w .rs-pt.good{border:1.5px solid #00a88f;background:rgba(0,168,143,.1)}
+#rs-w .rs-demo{margin:8px 0 2px;padding:8px 10px;border-radius:10px;background:#07020a;font-weight:800;font-size:15px;letter-spacing:.04em;text-align:center}
+#rs-w button{display:block;width:100%;padding:14px 10px;border:0;border-radius:12px;font:inherit;font-size:17px;font-weight:800;cursor:pointer;background:#00a88f;color:#fff;margin-top:16px}
+</style>
+<div id="rs-w" role="dialog" aria-modal="true" aria-labelledby="rs-wt"><div class="rs-card">
+<h2 id="rs-wt">Pick up where you left off</h2>
+<p class="rs-sub">New in Motion Comics</p>
+<div class="rs-pt good"><b>1. Save your spot</b>Open a movie or show in <b style="display:inline;font-size:inherit">To Watch</b> (tap Point Bomb to get to the list). You'll see a <b style="display:inline;font-size:inherit">Resume at</b> row with three sliders for hours, minutes and seconds.</div>
+<div class="rs-pt"><b>2. Slide, then Save</b>Slide each one to the time you stopped at and tap <b style="display:inline;font-size:inherit">Save</b>. No typing. It shows right under the title so you both know where to start next time.<div class="rs-demo">RESUME AT 1:23:45</div></div>
+<div class="rs-pt"><b>3. Only for To Watch</b>The sliders show up on To Watch items. If something is in <b style="display:inline;font-size:inherit">Unfinished</b>, ask Daddy to tap <b style="display:inline;font-size:inherit">To Watch</b> on it, then set your time.</div>
+<button type="button" class="rs-go">Got it</button>
+</div></div>
+<script>
+(function(){
+/* [S0] RESUME SLIDER NOTICE (Oct 13, 2026). One-time notice explaining the Resume at sliders. Shown on HER device (not Daddy's) the first time she opens the site. Per-device flag (not prefixed daddys-list, so it never syncs). ?resumenotice replays it on any device. Waits for any other popup (shared window.__dlChatOpen flag) so two never stack; starts a little later than the dots notice so that one goes first. window.__resumeNotice() shows it on demand. */
+var SEEN='dl-resume-update-v1',w=document.getElementById('rs-w');
+function g(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function s(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+var force=false;try{if(/[?&]resumenotice\b/.test(location.search)){localStorage.removeItem(SEEN);force=true}}catch(e){}
+function show(){w.classList.add('show');window.__dlChatOpen=true}
+function hide(){w.classList.remove('show');s(SEEN,'1');window.__dlChatOpen=false}
+window.__resumeNotice=show;
+w.querySelector('.rs-go').addEventListener('click',hide);
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&w.classList.contains('show'))hide()});
+if(!g(SEEN)&&(force||g('__dl_role')!=='daddy')){
+  var started=Date.now();
+  var iv=setInterval(function(){
+    if(g(SEEN)){clearInterval(iv);return}
+    if(w.classList.contains('show')||window.__dlChatOpen===true||Date.now()-started<2600)return;
+    if(document.visibilityState==='hidden')return;
+    var o=document.querySelectorAll('#dt-w.show,#sy-w.show,#fx-w.show,#rw-w.show,#th-w.show,#daddy-modal.show');if(o.length)return;
     clearInterval(iv);show();
   },400);
 }
