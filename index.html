@@ -48,7 +48,13 @@ function idle(){return Date.now()-lastTouch}
 function poll(){if(document.visibilityState!=='visible'||timer||busy)return;
 if(ls.getItem('__dl_dirty')==='1'){push();return}
 if(idle()<2000)return;if((window.__dlChatOpen||pOpen)&&idle()<120000)return;
-getRemote().then(function(j){if(j&&j.data&&j.version>ver&&!timer&&!busy&&idle()>=2000)location.reload()}).catch(function(){})}
+/* [S0] EAT TYPING FIX (Oct 13, 2026): while the Eat screen is open (grid has class has-eat1) the page must NOT reload to pick up changes from the other device, or the typed food disappears and nothing gets finished. Her own saves still go to the server as normal. Updates are held until Eat is closed, then the next check catches up (reload when idle). Safety: if Eat is left open and untouched for 10 minutes the hold ends. */
+function eatOpen(){return !!document.querySelector('.grid.has-eat1')&&idle()<600000}
+/* [S0] QUIET ADMIN TAPS (Oct 13, 2026, owner request). Basic tapping in admin mode (ticking, unticking, highlighting tasks) only changes daddys-list-state and daddys-list-live. On HER device, if those two are the ONLY things that differ from the server, the page no longer reloads for them. Anything else (points, rewards, movies, food, history, a refresh sent from Daddy's panel) still reloads like before. Her page shows his taps the next time it reloads. Daddy's own device is never quiet. Daddy can force her screen to refresh with the 'Refresh her screen' button in the sync panel (it writes daddys-list-refresh-ping). To turn this off, set QUIET_ON=false. */
+var QUIET_ON=true,QUIET={'daddys-list-state':1,'daddys-list-live':1};
+function quietOnly(d){if(!QUIET_ON||ls.getItem('__dl_role')==='daddy')return false;var s0=snap(),n=0,k;d=d||{};for(k in d){if(nkS(k,d[k])!==nkS(k,(k in s0)?s0[k]:null)){if(!QUIET[k])return false;n++}}for(k in s0){if(!(k in d)){if(!QUIET[k])return false;n++}}return n>0}
+if(eatOpen())return;
+getRemote().then(function(j){if(j&&j.data&&j.version>ver&&!timer&&!busy&&idle()>=2000&&!eatOpen()&&!quietOnly(j.data)&&!(window.__dlHold&&window.__dlHold()))location.reload()}).catch(function(){})}
 setInterval(poll,2500);
 ['pointerdown','touchstart','touchmove','keydown','wheel','mousedown'].forEach(function(e){document.addEventListener(e,function(){lastTouch=Date.now()},true)});
 function flush(){if(timer){clearTimeout(timer);push(true)}}
@@ -92,7 +98,7 @@ document.head.appendChild(css);
 ui=document.createElement('div');ui.id='dl-sy';
 ui.innerHTML='<button type="button" class="b" aria-label="Sync status"><span class="d"></span><span class="tag">NOT SAVING</span></button>'
 +'<div class="p"><p class="t"></p><button type="button" class="ex">Export backup</button><p class="m"></p>'
-+'<div class="a"><p class="h">Server backups (last 14 days)</p><select class="sel"></select><button type="button" class="w rs">Restore</button></div></div>';
++'<div class="a"><button type="button" class="rf">Refresh her screen</button><p class="h">Server backups (last 14 days)</p><select class="sel"></select><button type="button" class="w rs">Restore</button></div></div>';
 document.body.appendChild(ui);
 var $=function(q){return ui.querySelector(q)},msgT=null;
 function msg(t){var m=$('.m');m.textContent=t;clearTimeout(msgT);msgT=setTimeout(function(){m.textContent=''},9000)}
@@ -106,6 +112,7 @@ $('.b').addEventListener('click',function(){open_(!pOpen)});
 document.addEventListener('pointerdown',function(e){if(pOpen&&!ui.contains(e.target))open_(false)},true);
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&pOpen)open_(false)});
 function download(blob,name){var a=document.createElement('a'),u=URL.createObjectURL(blob);a.href=u;a.download=name;document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(u);a.remove()},4000)}
+$('.rf').addEventListener('click',function(){try{ls.setItem('daddys-list-refresh-ping',String(Date.now()));msg('Sent. Her screen refreshes in a few seconds.')}catch(e){msg('Could not send.')}});
 $('.ex').addEventListener('click',function(){var nm='daddys-list-backup-'+new Date().toISOString().slice(0,10)+'.json';msg('Getting the backup...');
 fetch(API+'?export=1&t='+Date.now(),{headers:hdrs(),cache:'no-store'}).then(function(r){return r.ok?r.blob():Promise.reject()}).then(function(b){download(b,nm);msg('Backup file sent to your downloads.')},
 function(){try{download(new Blob([JSON.stringify({exportedAt:new Date().toISOString(),source:'this device only (server not reachable)',data:snap()},null,1)],{type:'application/json'}),nm);msg('Server not reachable. Saved THIS device\'s copy instead.')}catch(e){msg('Could not make a backup file.')}})});
@@ -117,7 +124,56 @@ fetch(API,{method:'PUT',headers:hdrs(),body:JSON.stringify({restore:v})}).then(f
 paint();setInterval(paint,1000)}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',build);else build();
 })();
-</script><script>/* [S0] SHARED DAY (Oct 10, 2026). Daddy is in Dallas (Central), Lovey is in Sarnia, Ontario (Eastern, one hour ahead). Before, each device decided for itself when the day ended using its own local clock, so for one hour every night the two devices disagreed about what day it was and kept resetting the shared board. Now BOTH devices use the same clock for "what day is it": Sarnia (Eastern) time, with the day rolling over at 1:00 am Eastern (= midnight in Dallas) instead of midnight. Used by todayKey() (app), dayKey() (movies/points and Rewards) and armMidnight(). To change: edit TZ and ROLL_HOUR below. Falls back to the device's own clock if the browser cannot do time zones. The schedule rows and the "current time" display still follow each device's own local clock. */
+</script><script>/* [S0] SAFETY LOCK (Oct 13, 2026, owner request 39). ADMIN ONLY (__dl_role=daddy); does nothing on her device. A small padlock button, bottom-left beside the sync dot. OFF (default) = admin is completely free, exactly like before. ON = every tap in admin first asks "Are you sure?" (Yes / Cancel); scrolling never asks. While ON, the page also will NOT auto-refresh on Daddy's device: a small "Update waiting - tap to refresh" pill shows instead. Sync panel buttons Refresh her screen / Restore / Undo are covered too. Unlocking asks first. The setting lives only on this device (key __dl_lock, not synced). Mechanism: capture-phase listeners on window block trusted pointer/mouse/touch/key/input events, then a trusted click is held and the popup is shown; Yes replays pointerdown/mousedown/pointerup/mouseup/click on the same element (untrusted events always pass). Shim hook: poll() in the sync shim calls window.__dlHold(). To remove the whole feature, delete this script and the __dlHold bit in poll(). */
+(function(){
+var KEY='__dl_lock',ls=localStorage,pend=null,box=null,btn=null,pill=null;
+function admin(){try{return ls.getItem('__dl_role')==='daddy'}catch(e){return false}}
+function on(){try{return admin()&&ls.getItem(KEY)==='1'}catch(e){return false}}
+function setLock(v){try{ls.setItem(KEY,v?'1':'0')}catch(e){}paint()}
+function skip(t){if(!t||!t.closest)return true;if(t.closest('#dl-lk,#dl-lkc,#dl-lkp'))return true;if(t.closest('#dl-sy'))return !!t.closest('.b,.ex,.sel,.t,.m,.h');return false}
+function isField(t){return !!(t&&t.matches&&t.matches('input,textarea,select,[contenteditable="true"]'))}
+var BLOCK=['pointerdown','pointerup','mousedown','mouseup','touchstart','touchend','dblclick','auxclick','contextmenu','dragstart','keydown','keyup','keypress','input','change','submit'];
+BLOCK.forEach(function(n){window.addEventListener(n,function(e){if(!e.isTrusted||!on()||skip(e.target))return;e.stopImmediatePropagation()},true)});
+window.addEventListener('focusin',function(e){if(!on()||skip(e.target)||!isField(e.target))return;try{e.target.blur()}catch(x){}},true);
+window.addEventListener('click',function(e){if(!e.isTrusted||!on()||skip(e.target))return;e.stopImmediatePropagation();e.preventDefault();ask(e.target,e.clientX,e.clientY,false)},true);
+function css(){if(document.getElementById('dl-lk-css'))return;var s=document.createElement('style');s.id='dl-lk-css';
+s.textContent='#dl-lk{position:fixed;left:34px;bottom:calc(3px + env(safe-area-inset-bottom,0px));z-index:2147482000;display:none;padding:3px 9px;border-radius:12px;border:1px solid rgba(255,255,255,.35);background:rgba(12,5,16,.85);color:#fff;font:700 12px system-ui,-apple-system,sans-serif;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}'
++'#dl-lk.on{border-color:#ef4444;background:#7f1d1d}'
++'#dl-lkp{position:fixed;left:6px;bottom:calc(34px + env(safe-area-inset-bottom,0px));z-index:2147482000;display:none;padding:8px 12px;border-radius:12px;border:2px solid #f59e0b;background:#0c0510;color:#fff;font:800 13px system-ui,-apple-system,sans-serif;cursor:pointer}'
++'#dl-lkc{position:fixed;inset:0;z-index:2147483646;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:system-ui,-apple-system,sans-serif}'
++'#dl-lkc.s{display:flex}'
++'#dl-lkc .c{width:min(320px,calc(100vw - 32px));box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #ef4444;border-radius:16px;padding:18px;text-align:center}'
++'#dl-lkc .h{font-size:20px;font-weight:800;margin:0 0 6px}'
++'#dl-lkc .q{font-size:14px;color:#ff8fa8;margin:0 0 14px;min-height:1.2em;word-break:break-word}'
++'#dl-lkc .r{display:flex;gap:10px}'
++'#dl-lkc button{flex:1;padding:13px 8px;border:0;border-radius:12px;font:inherit;font-size:16px;font-weight:800;color:#fff;cursor:pointer}'
++'#dl-lkc .no{background:#444}#dl-lkc .yes{background:#00a88f}';
+document.head.appendChild(s)}
+function mk(){if(box)return;css();
+box=document.createElement('div');box.id='dl-lkc';box.innerHTML='<div class="c"><p class="h">Are you sure?</p><p class="q"></p><div class="r"><button type="button" class="no">Cancel</button><button type="button" class="yes">Yes</button></div></div>';
+document.body.appendChild(box);
+box.addEventListener('click',function(e){if(e.target===box||e.target.closest('.no'))close_();else if(e.target.closest('.yes'))go()});
+btn=document.createElement('button');btn.id='dl-lk';btn.type='button';document.body.appendChild(btn);
+btn.addEventListener('click',function(){if(on())ask(btn,0,0,true);else setLock(true)});
+pill=document.createElement('button');pill.id='dl-lkp';pill.type='button';pill.textContent='Update waiting \u00B7 tap to refresh';document.body.appendChild(pill);
+pill.addEventListener('click',function(){location.reload()})}
+function paint(){if(!document.body)return;var a=admin();if(a)mk();if(!box)return;btn.style.display=a?'block':'none';var l=on();btn.className=l?'on':'';btn.textContent=l?'\uD83D\uDD12 Locked':'\uD83D\uDD13';btn.setAttribute('aria-label',l?'Safety lock is on. Tap to unlock':'Safety lock is off. Tap to lock');if(!l)pill.style.display='none'}
+function ask(t,x,y,unlock){mk();pend={t:t,x:x,y:y,unlock:unlock};var q=box.querySelector('.q');
+if(unlock){q.textContent='Unlock so taps work instantly again?'}
+else{var lab=(t.closest&&t.closest('button,a,label,[role="button"],li,tr,.mc-row,.slot'))||t,tx=((lab.getAttribute&&lab.getAttribute('aria-label'))||lab.textContent||'').replace(/\s+/g,' ').trim().slice(0,40);q.textContent=tx?('You tapped: '+tx):'Do this?'}
+box.className='s'}
+function close_(){pend=null;if(box)box.className=''}
+function go(){var p=pend;close_();if(!p)return;if(p.unlock){setLock(false);return}var t=p.t;if(!t||!document.documentElement.contains(t))return;
+var o={bubbles:true,cancelable:true,composed:true,view:window,clientX:p.x,clientY:p.y,button:0};
+function fire(C,n,b){try{t.dispatchEvent(new C(n,Object.assign({buttons:b},o,C===window.PointerEvent?{isPrimary:true,pointerType:'touch'}:{})))}catch(e){}}
+if(window.PointerEvent)fire(PointerEvent,'pointerdown',1);fire(MouseEvent,'mousedown',1);if(window.PointerEvent)fire(PointerEvent,'pointerup',0);fire(MouseEvent,'mouseup',0);fire(MouseEvent,'click',0);
+if(isField(t))try{t.focus()}catch(e){}}
+window.__dlHold=function(){if(!on())return false;mk();pill.style.display='block';return true};
+window.__dlLock={on:on,set:setLock};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',paint);else paint();
+window.addEventListener('load',paint);setInterval(paint,1500);
+})();
+</script><script>/* [S0] POPUPS MUTED FOR NOW (Oct 13, 2026, owner request). Every older one-time update card is treated as already seen, so none of them show: dots (dl-dots-update-v2), sync (dl-sync-update-v5), stability (dl-stability-update-v3), rewards welcome (dl-rewards-welcome-v1), resume sliders (dl-resume-update-v1), themes intro (dl-themes-intro-v1). Nothing is deleted and no flag is changed in storage. To bring them back, set MUTED=false (or delete this script). The Eat card (dl-eatfix-update-v2) is NOT muted. Needed popups (approval, did-you-finish-this-movie) are not touched. */(function(){var MUTED=true,K={'dl-dots-update-v2':1,'dl-sync-update-v5':1,'dl-stability-update-v3':1,'dl-rewards-welcome-v1':1,'dl-resume-update-v1':1,'dl-themes-intro-v1':1};if(!MUTED)return;try{var g=Storage.prototype.getItem;Storage.prototype.getItem=function(k){return K[k]?'1':g.call(this,k)}}catch(e){}})();</script><script>/* [S0] SHARED DAY (Oct 10, 2026). Daddy is in Dallas (Central), Lovey is in Sarnia, Ontario (Eastern, one hour ahead). Before, each device decided for itself when the day ended using its own local clock, so for one hour every night the two devices disagreed about what day it was and kept resetting the shared board. Now BOTH devices use the same clock for "what day is it": Sarnia (Eastern) time, with the day rolling over at 1:00 am Eastern (= midnight in Dallas) instead of midnight. Used by todayKey() (app), dayKey() (movies/points and Rewards) and armMidnight(). To change: edit TZ and ROLL_HOUR below. Falls back to the device's own clock if the browser cannot do time zones. The schedule rows and the "current time" display still follow each device's own local clock. */
 (function(){var TZ='America/Toronto',ROLL_HOUR=1,fmt=null;
 try{fmt=new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});fmt.format(new Date())}catch(e){fmt=null}
 function pad(n){return String(n).padStart(2,'0')}
@@ -1440,7 +1496,7 @@ function addItem(){
  var i=document.getElementById('ep-in');if(!i)return;
  var v=i.value.replace(/\s+/g,' ').trim();
  if(v.length<2){i.focus();return}
- var lc=v.toLowerCase();if(draft.items.some(function(x){return x.toLowerCase()===lc})){i.value='';i.focus();return}
+ /* [S0] Oct 13, 2026: the same food can be added more than once (two eggs = two items, each 1/4 point). The old check that blocked and silently cleared a repeat was removed. */
  draft.items.push(v.slice(0,60));saveDraft();render();focusIn();navigator.vibrate&&navigator.vibrate(8);
 }
 function finish(){
@@ -2030,7 +2086,7 @@ html:has(#theme-driver:checked)::after{opacity:.4}
 .rw-item .rw-ad button:disabled{opacity:.3}
 .rw-item .rw-ad button.rw-dl2{background:#5b1a2a;color:#ff9db0;flex:0 0 52px}
 .rw-item.rw-edit input{box-sizing:border-box;min-width:0;padding:11px;border-radius:10px;border:2px solid #8b2be2;background:#14061c;color:#fff;font:inherit;font-size:16px}
-.rw-item.rw-edit .rw-en{flex:1 1 100%}.rw-item.rw-edit .rw-ec{flex:1 1 100%}
+.rw-item.rw-edit .rw-en{flex:1 1 100%}.rw-item.rw-edit .rw-ec{flex:1 1 100%}.rw-item.rw-edit .rw-ed{flex:1 1 100%}
 .rw-item .rw-ad button.rw-sv{background:#00a88f}
 #rw-claimed .rw-log{font-size:13.5px;opacity:.8;padding:4px 0}
 #rw-box :focus-visible,#rw-w :focus-visible{outline:3px solid #00d4b8;outline-offset:2px}
@@ -2096,6 +2152,7 @@ html:has(#theme-driver:checked)::after{opacity:.4}
 <div id="rw-admin" hidden>
 <div style="font-size:14px;font-weight:700">Daddy's tools</div>
 <div class="rw-row"><input id="rw-new-name" type="text" maxlength="60" placeholder="New reward" aria-label="New reward name"><input id="rw-new-cost" type="number" inputmode="numeric" min="1" step="1" placeholder="Cost" aria-label="Point cost"></div>
+<div class="rw-row"><input id="rw-new-desc" type="text" maxlength="140" placeholder="Description" aria-label="Description" style="flex:1"></div>
 <div class="rw-row"><button type="button" id="rw-add" style="flex:1">Add reward</button></div>
 <button type="button" id="rw-adjust">Add or subtract a custom amount</button>
 <button type="button" id="rw-mcx" style="width:100%;margin-top:10px;background:#3a2150">Export Motion Comics list</button>
@@ -2147,11 +2204,23 @@ window.__ptsPenalty=function(){return Math.floor(missedTotal()/MISS_PER_POINT)};
 
 function newOwed(){return{id:'o1',name:'Daddy\u2019s personal sleep video',due:Date.now()+30*DAY,delivered:null,bonus:0}}
 function load(){var d=null,ch=false;try{d=JSON.parse(g(DATA))}catch(e){}
-if(!d||!Array.isArray(d.items)){d={items:[{id:'r1',name:'You pick tonight\u2019s movie',cost:50},{id:'r5',name:'$20',cost:200},{id:'skip',name:'Skip a day',cost:3},{id:'r6',name:'$35',cost:300}],claimed:[],owed:[newOwed()],v:3,sk:1,sk2:1};ch=true}
+if(!d||!Array.isArray(d.items)){d={items:[{id:'r1',name:'You pick tonight\u2019s movie',cost:6},{id:'r5',name:'$20',cost:200},{id:'skip',name:'Skip a day',cost:3},{id:'r6',name:'$35',cost:300},{id:'r7',name:'$100',cost:600},{id:'r8',name:'Mommy?',cost:69,desc:'I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded.'},{id:'r9',name:'Reverse reward',cost:50,desc:'Brings back an already used reward.'}],claimed:[],owed:[newOwed()],v:3,sk:1,sk2:1,sk3:1,sk4:1,sk5:1,sk6:1,sk7:1,sk8:1};ch=true}
 if(d.v!==3){var old={r2:15,r3:25,r4:50};d.items=d.items.filter(function(i){return !(old[i.id]===i.cost)});d.items.forEach(function(i){if(i.id==='r1'&&i.cost===10)i.cost=50});if(!d.items.some(function(i){return i.id==='r5'}))d.items.push({id:'r5',name:'$20',cost:200});d.v=3;ch=true}
 if(!Array.isArray(d.owed)){d.owed=[newOwed()];ch=true}
 if(!d.sk){if(!d.items.some(function(i){return i.id==='skip'}))d.items.push({id:'skip',name:'Skip a day',cost:3});d.sk=1;ch=true}
 if(!d.sk2){d.items.forEach(function(i){if(i.id==='skip'&&i.cost===12)i.cost=3});if(!d.items.some(function(i){return i.id==='r6'}))d.items.push({id:'r6',name:'$35',cost:300});d.sk2=1;ch=true}
+/* [S0L] $100 REWARD (Oct 13, 2026, owner request): costs 600 points (600 points = $100). Added once to existing saved lists via the sk3 flag, so if Daddy later removes it with the admin remove button it does not come back. Item id r7. */
+if(!d.sk3){if(!d.items.some(function(i){return i.id==='r7'}))d.items.push({id:'r7',name:'$100',cost:600});d.sk3=1;ch=true}
+/* [S0L] SUB FOR 3 HOURS REWARD (Oct 13, 2026, owner request): item id r8, flag sk4, added once to existing saved lists, so if Daddy removes it in admin it does not come back. Per the master plan (request 51) this is the reward named "Mommy?": 69 points, Daddy is a sub to her for 3 hours straight, points fully refunded if he is not a complete sub. The cost and wording come from the owner's notes. */
+if(!d.sk4){if(!d.items.some(function(i){return i.id==='r8'}))d.items.push({id:'r8',name:'Mommy?',cost:69,desc:'I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded.'});d.sk4=1;ch=true}
+/* [S0L] REWARD DESCRIPTIONS (Oct 13, 2026, owner request): any reward can have an optional description (item.desc), shown small under the name; Daddy edits it in the admin Edit box. The r8 text comes from the master plan, request 51. Flag sk5 gives r8 its description once on lists that already had it. */
+if(!d.sk5){d.items.forEach(function(i){if(i.id==='r8'&&!i.desc)i.desc='I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded.'});d.sk5=1;ch=true}
+/* [S0L] REVERSE REWARD (Oct 13, 2026, owner request, plan request 48): "Reverse reward" (id r9, flag sk6). Per the master plan (request 48) the reverse reward is "Reverse reward", 50 points, "Brings back an already used reward." Cost and wording come from the owner's notes. The used-reward picker is NOT built; it claims like an ordinary reward. Added once; if Daddy removes it in admin it does not come back. */
+if(!d.sk6){if(!d.items.some(function(i){return i.id==='r9'}))d.items.push({id:'r9',name:'Reverse reward',cost:50,desc:'Brings back an already used reward.'});d.sk6=1;ch=true}
+/* [S0L] sk7: lists that already got the earlier PLACEHOLDER versions (r8 "Sub for 3 hours" 150, r9 "Dom for 3 hours" 150) are corrected once to the notes' cost and wording. Edited ones are left alone. */
+if(!d.sk7){d.items.forEach(function(i){if(i.id==='r8'&&i.name==='Sub for 3 hours'&&i.cost===150){i.name='Mommy?';i.cost=69;i.desc='I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded.'}if(i.id==='r9'&&i.name==='Dom for 3 hours'&&i.cost===150){i.name='Reverse reward';i.cost=50;i.desc='Brings back an already used reward.'}});d.sk7=1;ch=true}
+/* [S0L] MOVIE NIGHT PRICE (Oct 13, 2026, owner request, plan request 52): the Movie night reward (id r1, "You pick tonight's movie") costs 6 points now (it was 50). Changed once on saved lists via flag sk8, only if it is still 50, so a price Daddy set himself is left alone. */
+if(!d.sk8){d.items.forEach(function(i){if(i.id==='r1'&&i.cost===50)i.cost=6});d.sk8=1;ch=true}
 if(!Array.isArray(d.claimed))d.claimed=[];
 if(ch)save(d);return d}
 /* Owed rewards: due 30 days after creation. Once overdue, +LATE_PTS points per full day until delivered; the bonus freezes at delivery. */
@@ -2194,9 +2263,9 @@ function renderList(force){
  if(!force&&sig===lastSig)return;lastSig=sig;
  var h='';
  d.items.forEach(function(it,ix){
-  if(isAdmin()&&editing===it.id){h+='<div class="rw-item rw-edit" data-eid="'+esc(it.id)+'"><input class="rw-en" type="text" maxlength="60" value="'+esc(it.name)+'" aria-label="Reward name"><input class="rw-ec" type="number" inputmode="numeric" min="1" step="1" value="'+it.cost+'" aria-label="Point cost"><div class="rw-ad"><button type="button" class="rw-sv" data-save="'+esc(it.id)+'">Save</button><button type="button" data-cancel="1">Cancel</button></div></div>';return}
+  if(isAdmin()&&editing===it.id){h+='<div class="rw-item rw-edit" data-eid="'+esc(it.id)+'"><input class="rw-en" type="text" maxlength="60" value="'+esc(it.name)+'" aria-label="Reward name"><input class="rw-ec" type="number" inputmode="numeric" min="1" step="1" value="'+it.cost+'" aria-label="Point cost"><input class="rw-ed" type="text" maxlength="140" placeholder="Description (optional)" value="'+esc(it.desc||'')+'" aria-label="Description"><div class="rw-ad"><button type="button" class="rw-sv" data-save="'+esc(it.id)+'">Save</button><button type="button" data-cancel="1">Cancel</button></div></div>';return}
   var sk=it.id==='skip',act=sk&&skipToday(),bought=d.claimed.some(function(c){return c.id?c.id===it.id:c.name===it.name}),can=tot>=it.cost&&!act&&!bought,conf=pending===it.id;
-  h+='<div class="rw-item"><div class="rw-n">'+esc(it.name)+(sk?'<span class="rw-sk">A full day off. Nothing counts as missed, no penalty, and your dots stay put.</span>':'')+'<span class="rw-c">'+it.cost+' points'+(can||act||bought?'':' \u00b7 '+(it.cost-tot)+' to go')+'</span></div>'
+  h+='<div class="rw-item"><div class="rw-n">'+esc(it.name)+(sk?'<span class="rw-sk">A full day off. Nothing counts as missed, no penalty, and your dots stay put.</span>':(it.desc?'<span class="rw-sk">'+esc(it.desc)+'</span>':''))+'<span class="rw-c">'+it.cost+' points'+(can||act||bought?'':' \u00b7 '+(it.cost-tot)+' to go')+'</span></div>'
    +'<button type="button" class="rw-claim'+(conf?' confirm':'')+'" data-id="'+esc(it.id)+'"'+(can?'':' disabled')+'>'+(act?'On today':(bought?'Claimed':(conf?'Tap to confirm':'Claim')))+'</button>'
    +(isAdmin()?'<div class="rw-ad"><button type="button" data-mv="-1" data-id2="'+esc(it.id)+'"'+(ix===0?' disabled':'')+' aria-label="Move up">&#9650; Up</button><button type="button" data-mv="1" data-id2="'+esc(it.id)+'"'+(ix===d.items.length-1?' disabled':'')+' aria-label="Move down">&#9660; Down</button><button type="button" data-edit="'+esc(it.id)+'">&#9998; Edit</button><button type="button" class="rw-dl2" data-del="'+esc(it.id)+'" aria-label="Remove '+esc(it.name)+'">&times;</button></div>':'')+'</div>';
  });
@@ -2231,7 +2300,7 @@ $('rw-list').addEventListener('click',function(e){
  var sv=e.target.closest('[data-save]');
  if(sv&&isAdmin()){var row=sv.closest('.rw-item'),nm=row.querySelector('.rw-en').value.trim(),cs=parseInt(row.querySelector('.rw-ec').value,10);
   if(!nm){row.querySelector('.rw-en').focus();return}if(!cs||cs<1){row.querySelector('.rw-ec').focus();return}
-  var ds=load();ds.items.forEach(function(i){if(i.id===sv.getAttribute('data-save')){i.name=nm;i.cost=cs}});save(ds);editing=null;renderList(true);return}
+  var ds=load();ds.items.forEach(function(i){if(i.id===sv.getAttribute('data-save')){i.name=nm;i.cost=cs;var dv=row.querySelector('.rw-ed').value.trim();if(dv)i.desc=dv;else delete i.desc}});save(ds);editing=null;renderList(true);return}
  var del=e.target.closest('[data-del]');
  if(del){if(!confirm('Remove this reward?'))return;var d=load();d.items=d.items.filter(function(i){return i.id!==del.getAttribute('data-del')});save(d);renderList(true);return}
  var b=e.target.closest('.rw-claim');if(!b||b.disabled)return;
@@ -2248,10 +2317,10 @@ $('rw-list').addEventListener('click',function(e){
  renderAll(true);
 });
 $('rw-add').addEventListener('click',function(){
- var n=$('rw-new-name').value.trim(),c=parseInt($('rw-new-cost').value,10);
- if(!n){$('rw-new-name').focus();return}if(!c||c<1){$('rw-new-cost').focus();return}
- var d=load();d.items.push({id:'r'+Date.now().toString(36),name:n,cost:c});save(d);
- $('rw-new-name').value='';$('rw-new-cost').value='';renderList(true);
+ var n=$('rw-new-name').value.trim(),c=parseInt($('rw-new-cost').value,10),ds0=$('rw-new-desc').value.trim();
+ if(!n){$('rw-new-name').focus();return}if(!c||c<1){$('rw-new-cost').focus();return}if(!ds0){$('rw-new-desc').focus();return}/* [S0L] a description is REQUIRED when adding a reward (owner request, Oct 13, 2026) */
+ var d=load();d.items.push({id:'r'+Date.now().toString(36),name:n,cost:c,desc:ds0});save(d);
+ $('rw-new-name').value='';$('rw-new-cost').value='';$('rw-new-desc').value='';renderList(true);
 });
 $('rw-owed').addEventListener('click',function(e){
  var b=e.target.closest('[data-deliver]');if(!b||!isAdmin())return;var id=b.getAttribute('data-deliver');
@@ -2663,6 +2732,52 @@ if(!g(SEEN)&&(force||g('__dl_role')!=='daddy')){
     if(w.classList.contains('show')||window.__dlChatOpen===true||Date.now()-started<2600)return;
     if(document.visibilityState==='hidden')return;
     var o=document.querySelectorAll('#dt-w.show,#sy-w.show,#fx-w.show,#rw-w.show,#th-w.show,#daddy-modal.show');if(o.length)return;
+    clearInterval(iv);show();
+  },400);
+}
+})();
+</script>
+<style>
+/* One-time "I tried to fix Eat" notice (both devices). Same look as the other update cards. */
+#ef-w{position:fixed;inset:0;z-index:2147483000;display:none;align-items:center;justify-content:center;padding:22px;box-sizing:border-box;background:rgba(0,0,0,.82);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);touch-action:manipulation}
+#ef-w.show{display:flex}
+#ef-w .ef-card{width:100%;max-width:340px;max-height:100%;overflow-y:auto;box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #f40f4f;border-radius:16px;padding:24px 20px 18px;text-align:center;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 0 40px rgba(244,15,79,.35)}
+#ef-w h2{margin:0 0 4px;font-size:26px;font-weight:800;color:#fff}
+#ef-w .ef-sub{margin:0 0 16px;font-size:15px;color:#ff8fa8;font-weight:700}
+#ef-w .ef-pt{text-align:left;margin:0 0 12px;padding:12px;border-radius:12px;background:#150a1d;font-size:15.5px;line-height:1.45}
+#ef-w .ef-pt b{display:block;font-size:16px;margin-bottom:2px}
+#ef-w .ef-pt.good{border:1.5px solid #00a88f;background:rgba(0,168,143,.1)}
+#ef-w button{display:block;width:100%;padding:14px 10px;border:0;border-radius:12px;font:inherit;font-size:17px;font-weight:800;cursor:pointer;background:#00a88f;color:#fff;margin-top:16px}
+</style>
+<div id="ef-w" role="dialog" aria-modal="true" aria-labelledby="ef-wt"><div class="ef-card">
+<h2 id="ef-wt">I tried to fix Eat</h2>
+<p class="ef-sub">hope it works</p>
+<div class="ef-pt good"><b>1. My tapping won't refresh you</b>When I tap or highlight tasks on my side, your screen won't refresh anymore. You'll see it the next time your page refreshes. Other stuff I change, like points, rewards, movies or food, can still refresh your screen. If I want you to see something right away I'll send a refresh myself.</div>
+<div class="ef-pt"><b>2. Eat, no more refreshing (hopefully)</b>I tried to make it stop refreshing while you type. Updates from the other phone or laptop now wait till you close Eat. Hope that does it.</div>
+<div class="ef-pt"><b>3. Same food twice</b>You can add the same thing twice now. Each one counts.</div>
+<div class="ef-pt"><b>4. Still messed up?</b>If it still refreshes or doesn't save, tell me and I'll fix it again.</div>
+<button type="button" class="ef-go">Got it</button>
+</div></div>
+<script>
+(function(){
+/* [S0] EAT FIX NOTICE (Oct 13, 2026). One-time update card for both devices, worded as a hopeful try, not a sure fix, in the owner's own voice (first person: I tried, hope it works). Shows 2 seconds after load. Per-device flag dl-eatfix-update-v2 (never syncs). ?eatfixnotice replays it. Waits for any other popup (window.__dlChatOpen and the .show cards) and for the resume card, so two never stack. window.__eatFixNotice() shows it on demand. */
+var SEEN='dl-eatfix-update-v2',w=document.getElementById('ef-w');
+function g(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function s(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+var force=false;try{if(/[?&]eatfixnotice\b/.test(location.search)){localStorage.removeItem(SEEN);force=true}}catch(e){}
+function show(){w.classList.add('show');window.__dlChatOpen=true}
+function hide(){w.classList.remove('show');s(SEEN,'1');window.__dlChatOpen=false}
+window.__eatFixNotice=show;
+w.querySelector('.ef-go').addEventListener('click',hide);
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&w.classList.contains('show'))hide()});
+if(!g(SEEN)||force){
+  var started=Date.now();
+  var iv=setInterval(function(){
+    if(g(SEEN)&&!force){clearInterval(iv);return}
+    if(w.classList.contains('show')||window.__dlChatOpen===true||Date.now()-started<2000)return;
+    if(document.visibilityState==='hidden')return;
+    if(document.querySelector('.grid.has-eat1'))return;
+    var o=document.querySelectorAll('#dt-w.show,#sy-w.show,#fx-w.show,#rw-w.show,#th-w.show,#rs-w.show,#daddy-modal.show');if(o.length)return;
     clearInterval(iv);show();
   },400);
 }
