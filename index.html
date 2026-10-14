@@ -4,6 +4,20 @@ On load: synchronous GET. Server wins unless this device has unsynced edits (__d
 var API='/api/state',P='daddys-list',SKIP=/^daddys-list-(bright|nightshift|state-v1-backup)$/;
 var ls,_set=Storage.prototype.setItem,_rem=Storage.prototype.removeItem,timer=null,ver=0,base={},lastTouch=0,busy=false,hadBase=false,st={ok:0,failSince:0,dirtyAt:0},pOpen=false;
 try{ls=window.localStorage;ls.getItem('x')}catch(e){return}
+/* [S0] SAFETY LOCK (local-only mode, Oct 13, 2026). When Daddy has the lock on, NOTHING is sent: put() and any non-GET /api/ fetch (chat, alerts, restore) stop. He still RECEIVES her updates (poll and the load step pull them in and merge them under his unsent edits with lockMerge). See the SAFETY LOCK script below the shim. */
+function held(){try{return ls.getItem('__dl_role')==='daddy'&&ls.getItem('__dl_lock')==='1'}catch(e){return false}}
+/* [S0] LOCK MERGE (copy of the three-way merge in state.mjs, run on THIS device only): while locked, her updates are pulled in and merged under Daddy's unsent edits, nothing is pushed. */
+var same_=function(a,b){return JSON.stringify(a)===JSON.stringify(b)},isObj_=function(x){return x&&typeof x==='object'&&!Array.isArray(x)},DATE_=/^\d{4}-\d\d-\d\d$/;
+function conflict_(l,s){if(isObj_(l)&&isObj_(s)&&typeof l.savedAt==='string'&&typeof s.savedAt==='string')return l.savedAt>=s.savedAt?l:s;if(typeof l==='string'&&typeof s==='string'&&DATE_.test(l)&&DATE_.test(s))return l>s?l:s;return l}
+function mergeObj_(bS,lS,sS){var B,L,S,k;try{B=bS==null?{}:JSON.parse(bS);L=JSON.parse(lS);S=JSON.parse(sS)}catch(e){return null}if(!isObj_(B))B={};if(!isObj_(L)||!isObj_(S))return null;var out={},keys={};for(k in B)keys[k]=1;for(k in L)keys[k]=1;for(k in S)keys[k]=1;for(k in keys){var b=B[k],l=L[k],s=S[k],r;if(same_(l,b))r=s;else if(same_(s,b))r=l;else if(same_(l,s))r=l;else r=conflict_(l,s);if(r!==undefined)out[k]=r}return JSON.stringify(out)}
+function mergeKey_(b,l,s){if(l===s)return l;if(l===b)return s;if(s===b||s===undefined)return l;if(l==null)return null;var m=mergeObj_(b,l,s);return m!==null?m:l}
+/* [S0] lockMerge(S): S = the server copy. After it, base = S and this device holds S plus Daddy's unsent edits on top, so changed() / Send work from there. */
+function lockMerge(S){var L=snap(),keys={},k;for(k in S)keys[k]=1;for(k in L)keys[k]=1;for(k in base)keys[k]=1;
+for(k in keys){var b=((k in base)&&base[k]!=null)?base[k]:undefined,lv=(k in L)?L[k]:undefined,sv=(k in S)?S[k]:undefined,m;
+if(lv===b)m=sv;else m=mergeKey_(b,lv==null?null:lv,sv);
+if(m==null){if(k in L)_rem.call(ls,k)}else if(m!==lv)_set.call(ls,k,m)}
+base={};for(k in S)base[k]=S[k];saveBase()}
+var _fetch=window.fetch;if(_fetch)window.fetch=function(u,o){try{var m=String((o&&o.method)||(u&&u.method)||'GET').toUpperCase();if(m!=='GET'&&m!=='HEAD'&&held()&&/\/api\//.test(String((u&&u.url)||u)))return Promise.reject(new TypeError('Safety lock is on: nothing is sent'))}catch(e){}return _fetch.apply(this,arguments)};
 function good(){st.ok=Date.now();st.failSince=0}
 function bad(){if(!st.failSince)st.failSince=Date.now()}
 function tok(){return ls.getItem('__dl_token')||''}
@@ -26,7 +40,7 @@ if(x.status===200)return JSON.parse(x.responseText)}catch(e){}return null}
 function pushSync(s,d){try{var x=new XMLHttpRequest();x.open('PUT',API,false);x.setRequestHeader('content-type','application/json');x.setRequestHeader('x-client-time',String(Date.now()));if(tok())x.setRequestHeader('x-sync-token',tok());
 x.send(JSON.stringify({patch:d}));if(x.status===200){var j=JSON.parse(x.responseText);ver=j.version||ver;base=s;saveBase();dirty0();good();return j}}catch(e){}bad();return null}
 function getRemote(){return fetch(API+'?t='+Date.now(),{headers:hdrs(),cache:'no-store'}).then(function(r){if(r.ok){good();return r.json()}bad();return null},function(){bad();return null})}
-function put(force){if(busy)return Promise.resolve();var s=snap(),d=diff(s);if(!d){if(!timer)dirty0();return Promise.resolve()}
+function put(force){if(held()||busy)return Promise.resolve();var s=snap(),d=diff(s);if(!d){if(!timer)dirty0();return Promise.resolve()}
 var bodyS=JSON.stringify({patch:d});busy=true;var bt=setTimeout(function(){busy=false},20000);/* [S0] safety: a hung request can never block saving forever */
 return fetch(API,{method:'PUT',headers:hdrs(),body:bodyS,keepalive:!!force&&bodyS.length<60000}).then(function(r){return r.ok?r.json():Promise.reject()})
 .then(function(j){clearTimeout(bt);busy=false;good();base=s;saveBase();if(j&&j.data&&!sameData(j.data,s)){/* server holds another device's changes: keep ver old so the next check reloads to show them */}else{ver=j.version||ver}
@@ -37,16 +51,18 @@ function touch(k){if(!synced(k))return;if(!changedKey(k)&&!diff(snap()))return;t
 Storage.prototype.setItem=function(k,v){_set.call(this,k,v);if(this===ls)touch(k)};
 Storage.prototype.removeItem=function(k){_rem.call(this,k);if(this===ls)touch(k)};
 try{var b0=ls.getItem('__dl_base');if(b0!==null){base=JSON.parse(b0)||{};hadBase=true}}catch(e){base={};hadBase=false}
-var dirty=ls.getItem('__dl_dirty')==='1',r=pullSync();if(r)good();else bad();
+if(ls.getItem('__dl_lock_discard')==='1'){_rem.call(ls,'__dl_lock_discard');_set.call(ls,'__dl_lock','0');_set.call(ls,'__dl_dirty','0')}/* [S0] lock: 'Throw them away' lands here: unlock, forget unsent edits, and the server copy wins below */
+var LOCKED=held(),dirty=ls.getItem('__dl_dirty')==='1',r=pullSync();if(r)good();else bad();
 if(r){ver=r.version||0;
 if(r.data){
-if(dirty&&hadBase){var s0=snap(),d0=diff(s0),m=d0?pushSync(s0,d0):{data:r.data,version:r.version};if(m&&m.data){apply(m.data);base=snap();saveBase();dirty0()}}
+if(LOCKED){lockMerge(r.data)}/* [S0] lock: pull her updates in, push nothing */
+else if(dirty&&hadBase){var s0=snap(),d0=diff(s0),m=d0?pushSync(s0,d0):{data:r.data,version:r.version};if(m&&m.data){apply(m.data);base=snap();saveBase();dirty0()}}
 else{apply(r.data);base=snap();saveBase();dirty0()}
-}else{var s1=snap();base={};var d1=diff(s1);if(d1)pushSync(s1,d1);else{base=s1;saveBase()}}
+}else if(!LOCKED){var s1=snap();base={};var d1=diff(s1);if(d1)pushSync(s1,d1);else{base=s1;saveBase()}}
 }else if(!hadBase){base=snap()}
 function idle(){return Date.now()-lastTouch}
 function poll(){if(document.visibilityState!=='visible'||timer||busy)return;
-if(ls.getItem('__dl_dirty')==='1'){push();return}
+if(ls.getItem('__dl_dirty')==='1'&&!held()){push();return}
 if(idle()<2000)return;if((window.__dlChatOpen||pOpen)&&idle()<120000)return;
 /* [S0] EAT TYPING FIX (Oct 13, 2026): while the Eat screen is open (grid has class has-eat1) the page must NOT reload to pick up changes from the other device, or the typed food disappears and nothing gets finished. Her own saves still go to the server as normal. Updates are held until Eat is closed, then the next check catches up (reload when idle). Safety: if Eat is left open and untouched for 10 minutes the hold ends. */
 function eatOpen(){return !!document.querySelector('.grid.has-eat1')&&idle()<600000}
@@ -54,7 +70,8 @@ function eatOpen(){return !!document.querySelector('.grid.has-eat1')&&idle()<600
 var QUIET_ON=true,QUIET={'daddys-list-state':1,'daddys-list-live':1};
 function quietOnly(d){if(!QUIET_ON||ls.getItem('__dl_role')==='daddy')return false;var s0=snap(),n=0,k;d=d||{};for(k in d){if(nkS(k,d[k])!==nkS(k,(k in s0)?s0[k]:null)){if(!QUIET[k])return false;n++}}for(k in s0){if(!(k in d)){if(!QUIET[k])return false;n++}}return n>0}
 if(eatOpen())return;
-getRemote().then(function(j){if(j&&j.data&&j.version>ver&&!timer&&!busy&&idle()>=2000&&!eatOpen()&&!quietOnly(j.data)&&!(window.__dlHold&&window.__dlHold()))location.reload()}).catch(function(){})}
+getRemote().then(function(j){if(j&&j.data&&j.version>ver&&!timer&&!busy&&idle()>=2000&&!eatOpen()&&!quietOnly(j.data)){if(held()){lockMerge(j.data);ver=j.version}location.reload()}}).catch(function(){})}
+window.__dlShim={changed:function(){try{return !!diff(snap())}catch(e){return false}},flush:function(){try{clearTimeout(timer);timer=null;put(true)}catch(e){}}};
 setInterval(poll,2500);
 ['pointerdown','touchstart','touchmove','keydown','wheel','mousedown'].forEach(function(e){document.addEventListener(e,function(){lastTouch=Date.now()},true)});
 function flush(){if(timer){clearTimeout(timer);push(true)}}
@@ -64,7 +81,7 @@ window.addEventListener('pagehide',flush);
 
 /* [S0] SYNC LIGHT + BACKUP PANEL (Oct 10, 2026). ADMIN ONLY (shown only when __dl_role=daddy; hidden on her device). A small dot, bottom-left. Green = saved and in step with the server ("Synced 12 s ago"). Amber = saving, or has not checked for a while. Red = saving has stopped (server unreachable or refusing, device offline, or changes stuck unsaved for 20 s+), with a "NOT SAVING" tag. Tap it for the panel: status, Export backup (downloads the server copy; if the server cannot be reached it exports this device's copy), and for admin (__dl_role=daddy) a Restore from the last 14 daily server backups (two taps) plus Undo last restore. Server side: state.mjs v5. Uses only the shim's own good()/bad() marks. Nothing here is synced. */
 function ago(s){return s<3?'just now':s<60?s+' s ago':s<3600?Math.floor(s/60)+' min ago':Math.floor(s/3600)+' h ago'}
-function status(){var now=Date.now(),age=st.ok?Math.round((now-st.ok)/1000):null,d=ls.getItem('__dl_dirty')==='1';
+function status(){if(ls.getItem('__dl_role')==='daddy'&&ls.getItem('__dl_lock')==='1')return{c:'a',t:'LOCKED. Nothing you do is sent to her or the server. You still get her updates.'};var now=Date.now(),age=st.ok?Math.round((now-st.ok)/1000):null,d=ls.getItem('__dl_dirty')==='1';
 if(d){if(!st.dirtyAt)st.dirtyAt=now}else st.dirtyAt=0;
 if(navigator.onLine===false)return{c:'r',t:'Offline. Changes are kept on this device and will save when the internet is back.'};
 if(st.failSince&&now-st.failSince>7000)return{c:'r',t:'Not saving. '+(age===null?'No good connection yet.':'Last good sync '+ago(age)+'.')+' Changes stay on this device and keep retrying.'};
@@ -112,7 +129,7 @@ $('.b').addEventListener('click',function(){open_(!pOpen)});
 document.addEventListener('pointerdown',function(e){if(pOpen&&!ui.contains(e.target))open_(false)},true);
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&pOpen)open_(false)});
 function download(blob,name){var a=document.createElement('a'),u=URL.createObjectURL(blob);a.href=u;a.download=name;document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(u);a.remove()},4000)}
-$('.rf').addEventListener('click',function(){try{ls.setItem('daddys-list-refresh-ping',String(Date.now()));msg('Sent. Her screen refreshes in a few seconds.')}catch(e){msg('Could not send.')}});
+$('.rf').addEventListener('click',function(){if(ls.getItem('__dl_lock')==='1'){msg('Locked, so nothing is sent. Unlock first.');return}try{ls.setItem('daddys-list-refresh-ping',String(Date.now()));msg('Sent. Her screen refreshes in a few seconds.')}catch(e){msg('Could not send.')}});
 $('.ex').addEventListener('click',function(){var nm='daddys-list-backup-'+new Date().toISOString().slice(0,10)+'.json';msg('Getting the backup...');
 fetch(API+'?export=1&t='+Date.now(),{headers:hdrs(),cache:'no-store'}).then(function(r){return r.ok?r.blob():Promise.reject()}).then(function(b){download(b,nm);msg('Backup file sent to your downloads.')},
 function(){try{download(new Blob([JSON.stringify({exportedAt:new Date().toISOString(),source:'this device only (server not reachable)',data:snap()},null,1)],{type:'application/json'}),nm);msg('Server not reachable. Saved THIS device\'s copy instead.')}catch(e){msg('Could not make a backup file.')}})});
@@ -124,51 +141,39 @@ fetch(API,{method:'PUT',headers:hdrs(),body:JSON.stringify({restore:v})}).then(f
 paint();setInterval(paint,1000)}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',build);else build();
 })();
-</script><script>/* [S0] SAFETY LOCK (Oct 13, 2026, owner request 39). ADMIN ONLY (__dl_role=daddy); does nothing on her device. A small padlock button, bottom-left beside the sync dot. OFF (default) = admin is completely free, exactly like before. ON = every tap in admin first asks "Are you sure?" (Yes / Cancel); scrolling never asks. While ON, the page also will NOT auto-refresh on Daddy's device: a small "Update waiting - tap to refresh" pill shows instead. Sync panel buttons Refresh her screen / Restore / Undo are covered too. Unlocking asks first. The setting lives only on this device (key __dl_lock, not synced). Mechanism: capture-phase listeners on window block trusted pointer/mouse/touch/key/input events, then a trusted click is held and the popup is shown; Yes replays pointerdown/mousedown/pointerup/mouseup/click on the same element (untrusted events always pass). Shim hook: poll() in the sync shim calls window.__dlHold(). To remove the whole feature, delete this script and the __dlHold bit in poll(). */
+</script><script>/* [S0] SAFETY LOCK = LOCAL-ONLY MODE (Oct 13, 2026, owner request). ADMIN ONLY (__dl_role=daddy); does nothing on her device. A big padlock button, bottom-left. OFF (default) = admin is free and everything saves/syncs as normal. ON = the site behaves completely NORMALLY on Daddy's device, but nothing is sent: no saving to the server, no push to her screen, no chat or alerts, no Refresh her screen, no Restore. Daddy's device STILL receives her updates (and her refreshes) and merges them under his unsent edits. Changes he makes stay on this device only. Unlocking (Oct 14, 2026, owner request): if nothing changed it just unlocks; if things changed, unlocking UNDOES all of them (same path as the old 'Throw them away': __dl_lock_discard, reload, server copy wins) so he matches her again, and his next actions save and sync normally. There is no longer a 'Send my changes' choice. The setting lives only on this device (key __dl_lock, not synced). The blocking itself is in the sync shim (search held() in the first script): put(), lockMerge() for incoming updates, a fetch guard for non-GET /api/ calls, and window.__dlShim (changed/flush). The red sync dot says LOCKED while it is on. To remove the feature, delete this script and the held() bits in the shim. */
 (function(){
-var KEY='__dl_lock',ls=localStorage,pend=null,box=null,btn=null,pill=null;
+var KEY='__dl_lock',ls=localStorage,box=null,btn=null;
 function admin(){try{return ls.getItem('__dl_role')==='daddy'}catch(e){return false}}
 function on(){try{return admin()&&ls.getItem(KEY)==='1'}catch(e){return false}}
-function setLock(v){try{ls.setItem(KEY,v?'1':'0')}catch(e){}paint()}
-function skip(t){if(!t||!t.closest)return true;if(t.closest('#dl-lk,#dl-lkc,#dl-lkp'))return true;if(t.closest('#dl-sy'))return !!t.closest('.b,.ex,.sel,.t,.m,.h');return false}
-function isField(t){return !!(t&&t.matches&&t.matches('input,textarea,select,[contenteditable="true"]'))}
-var BLOCK=['pointerdown','pointerup','mousedown','mouseup','touchstart','touchend','dblclick','auxclick','contextmenu','dragstart','keydown','keyup','keypress','input','change','submit'];
-BLOCK.forEach(function(n){window.addEventListener(n,function(e){if(!e.isTrusted||!on()||skip(e.target))return;e.stopImmediatePropagation()},true)});
-window.addEventListener('focusin',function(e){if(!on()||skip(e.target)||!isField(e.target))return;try{e.target.blur()}catch(x){}},true);
-window.addEventListener('click',function(e){if(!e.isTrusted||!on()||skip(e.target))return;e.stopImmediatePropagation();e.preventDefault();ask(e.target,e.clientX,e.clientY,false)},true);
+function shim(){return window.__dlShim||null}
+function setLock(v){try{if(v&&shim())shim().flush();ls.setItem(KEY,v?'1':'0')}catch(e){}paint()}
 function css(){if(document.getElementById('dl-lk-css'))return;var s=document.createElement('style');s.id='dl-lk-css';
-s.textContent='#dl-lk{position:fixed;left:34px;bottom:calc(3px + env(safe-area-inset-bottom,0px));z-index:2147482000;display:none;padding:3px 9px;border-radius:12px;border:1px solid rgba(255,255,255,.35);background:rgba(12,5,16,.85);color:#fff;font:700 12px system-ui,-apple-system,sans-serif;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}'
-+'#dl-lk.on{border-color:#ef4444;background:#7f1d1d}'
-+'#dl-lkp{position:fixed;left:6px;bottom:calc(34px + env(safe-area-inset-bottom,0px));z-index:2147482000;display:none;padding:8px 12px;border-radius:12px;border:2px solid #f59e0b;background:#0c0510;color:#fff;font:800 13px system-ui,-apple-system,sans-serif;cursor:pointer}'
+s.textContent='#dl-lk{position:fixed;left:10px;bottom:calc(32px + env(safe-area-inset-bottom,0px));z-index:2147481000;display:none;width:68px;height:68px;border-radius:50%;padding:0;border:3px solid rgba(255,255,255,.5);background:rgba(12,5,16,.88);color:#fff;font-family:system-ui,-apple-system,sans-serif;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent;box-shadow:0 2px 12px rgba(0,0,0,.6);flex-direction:column;align-items:center;justify-content:center;line-height:1}'
++'#dl-lk .i{font-size:36px}#dl-lk .l{display:none;font-size:11px;font-weight:900;letter-spacing:.05em;margin-top:2px}'
++'#dl-lk.on{background:#b91c1c;border-color:#fff;box-shadow:0 0 0 3px rgba(185,28,28,.5),0 2px 14px rgba(0,0,0,.7)}#dl-lk.on .l{display:block}#dl-lk.on .i{font-size:30px}'
 +'#dl-lkc{position:fixed;inset:0;z-index:2147483646;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:system-ui,-apple-system,sans-serif}'
 +'#dl-lkc.s{display:flex}'
-+'#dl-lkc .c{width:min(320px,calc(100vw - 32px));box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #ef4444;border-radius:16px;padding:18px;text-align:center}'
++'#dl-lkc .c{width:min(330px,calc(100vw - 32px));box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #ef4444;border-radius:16px;padding:18px;text-align:center}'
 +'#dl-lkc .h{font-size:20px;font-weight:800;margin:0 0 6px}'
-+'#dl-lkc .q{font-size:14px;color:#ff8fa8;margin:0 0 14px;min-height:1.2em;word-break:break-word}'
-+'#dl-lkc .r{display:flex;gap:10px}'
-+'#dl-lkc button{flex:1;padding:13px 8px;border:0;border-radius:12px;font:inherit;font-size:16px;font-weight:800;color:#fff;cursor:pointer}'
-+'#dl-lkc .no{background:#444}#dl-lkc .yes{background:#00a88f}';
++'#dl-lkc .q{font-size:14px;color:#ff8fa8;margin:0 0 14px;line-height:1.4}'
++'#dl-lkc button{display:block;width:100%;margin-top:8px;padding:13px 8px;border:0;border-radius:12px;font:inherit;font-size:16px;font-weight:800;color:#fff;cursor:pointer;background:#444}'
++'#dl-lkc button.g{background:#00a88f}#dl-lkc button.r{background:#ef4444}';
 document.head.appendChild(s)}
 function mk(){if(box)return;css();
-box=document.createElement('div');box.id='dl-lkc';box.innerHTML='<div class="c"><p class="h">Are you sure?</p><p class="q"></p><div class="r"><button type="button" class="no">Cancel</button><button type="button" class="yes">Yes</button></div></div>';
+box=document.createElement('div');box.id='dl-lkc';box.innerHTML='<div class="c"><p class="h"></p><p class="q"></p><div class="r"></div></div>';
 document.body.appendChild(box);
-box.addEventListener('click',function(e){if(e.target===box||e.target.closest('.no'))close_();else if(e.target.closest('.yes'))go()});
-btn=document.createElement('button');btn.id='dl-lk';btn.type='button';document.body.appendChild(btn);
-btn.addEventListener('click',function(){if(on())ask(btn,0,0,true);else setLock(true)});
-pill=document.createElement('button');pill.id='dl-lkp';pill.type='button';pill.textContent='Update waiting \u00B7 tap to refresh';document.body.appendChild(pill);
-pill.addEventListener('click',function(){location.reload()})}
-function paint(){if(!document.body)return;var a=admin();if(a)mk();if(!box)return;btn.style.display=a?'block':'none';var l=on();btn.className=l?'on':'';btn.textContent=l?'\uD83D\uDD12 Locked':'\uD83D\uDD13';btn.setAttribute('aria-label',l?'Safety lock is on. Tap to unlock':'Safety lock is off. Tap to lock');if(!l)pill.style.display='none'}
-function ask(t,x,y,unlock){mk();pend={t:t,x:x,y:y,unlock:unlock};var q=box.querySelector('.q');
-if(unlock){q.textContent='Unlock so taps work instantly again?'}
-else{var lab=(t.closest&&t.closest('button,a,label,[role="button"],li,tr,.mc-row,.slot'))||t,tx=((lab.getAttribute&&lab.getAttribute('aria-label'))||lab.textContent||'').replace(/\s+/g,' ').trim().slice(0,40);q.textContent=tx?('You tapped: '+tx):'Do this?'}
-box.className='s'}
-function close_(){pend=null;if(box)box.className=''}
-function go(){var p=pend;close_();if(!p)return;if(p.unlock){setLock(false);return}var t=p.t;if(!t||!document.documentElement.contains(t))return;
-var o={bubbles:true,cancelable:true,composed:true,view:window,clientX:p.x,clientY:p.y,button:0};
-function fire(C,n,b){try{t.dispatchEvent(new C(n,Object.assign({buttons:b},o,C===window.PointerEvent?{isPrimary:true,pointerType:'touch'}:{})))}catch(e){}}
-if(window.PointerEvent)fire(PointerEvent,'pointerdown',1);fire(MouseEvent,'mousedown',1);if(window.PointerEvent)fire(PointerEvent,'pointerup',0);fire(MouseEvent,'mouseup',0);fire(MouseEvent,'click',0);
-if(isField(t))try{t.focus()}catch(e){}}
-window.__dlHold=function(){if(!on())return false;mk();pill.style.display='block';return true};
+box.addEventListener('click',function(e){if(e.target===box)box.className=''});
+btn=document.createElement('button');btn.id='dl-lk';btn.type='button';btn.innerHTML='<span class="i"></span><span class="l">LOCKED</span>';document.body.appendChild(btn);
+btn.addEventListener('click',function(){if(!on()){setLock(true);return}askUnlock()})}
+function dlg(h,q,bs){mk();box.querySelector('.h').textContent=h;box.querySelector('.q').textContent=q;var r=box.querySelector('.r');r.innerHTML='';
+bs.forEach(function(b){var x=document.createElement('button');x.type='button';x.textContent=b.t;if(b.c)x.className=b.c;x.addEventListener('click',function(){box.className='';if(b.f)b.f()});r.appendChild(x)});box.className='s'}
+function askUnlock(){var ch=false;try{ch=!!(shim()&&shim().changed())}catch(e){}
+if(!ch){dlg('Unlock?','Nothing changed while locked. After unlocking, everything you do saves to the server and her screen again.',[{t:'Yes, unlock',c:'g',f:function(){setLock(false)}},{t:'Stay locked'}]);return}
+dlg('Unlock?','Everything you changed while locked will be undone, and your screen goes back to matching hers. After that, anything you do saves and syncs normally again.',[
+{t:'Yes, unlock and sync',c:'g',f:function(){try{ls.setItem('__dl_lock_discard','1')}catch(e){}location.reload()}},
+{t:'Stay locked'}])}
+function paint(){if(!document.body)return;var a=admin();if(a)mk();if(!box)return;btn.style.display=a?'flex':'none';var l=on();btn.className=l?'on':'';btn.querySelector('.i').textContent=l?'\uD83D\uDD12':'\uD83D\uDD13';btn.setAttribute('aria-label',l?'Safety lock is ON. Nothing is sent. Tap to unlock':'Safety lock is off. Tap to lock')}
 window.__dlLock={on:on,set:setLock};
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',paint);else paint();
 window.addEventListener('load',paint);setInterval(paint,1500);
@@ -432,7 +437,7 @@ if(D.startViewTransition){mk();root.classList.add('theme-vt');let vt;try{vt=D.st
 else{mk();root.classList.add('theme-fade');flip();burst(toDark);clearTimeout(window.__tfT);window.__tfT=setTimeout(end,1050)}}
 themeBox.addEventListener('click',e=>{if(e.defaultPrevented)return;e.preventDefault();toggleTheme()})})();QA('form').forEach(f=>f.addEventListener('reset',()=>setTimeout(()=>{updFTS(f);svS();sTCS();upC()},0)));G.addEventListener('pointerdown',e=>{let tc=e.target.closest('.time');if(!tc)return;isD=1;hasD=canD=0;startY=e.clientY;startH=tSH=ASH;dVO=0;lastY=e.clientY;lastT=Date.now();vel=0;tc.setPointerCapture(e.pointerId);dHT=setTimeout(()=>{if(isD&&!hasD){canD=1;D.body.classList.add('timeline-dragging');tc.classList.add('drag-ready-pop');navigator.vibrate&&navigator.vibrate(15)}},350)});G.addEventListener('pointermove',e=>{if(!isD)return;let nw=Date.now(),dt=nw-lastT;if(dt>0){vel=(e.clientY-lastY)/dt;lastY=e.clientY;lastT=nw}let d=e.clientY-startY;if(!canD&&M.abs(d)>10){clearTimeout(dHT);isD=0;let tc=e.target.closest('.time');if(tc)tc.releasePointerCapture(e.pointerId);return}if(canD){if(M.abs(d)>5)hasD=1;if(hasD){let rh=e.target.closest('.slot')?.offsetHeight||40,aS=M.trunc(d/rh);dVO=d%rh;let nH=(startH-aS*3)%24;while(nH<=0)nH+=24;if(nH!=tSH){tSH=nH;navigator.vibrate&&navigator.vibrate(5)}uTL(0)}}});const eD=e=>{clearTimeout(dHT);if(isD){isD=0;let tc=e.target.closest('.time');if(tc){tc.releasePointerCapture(e.pointerId);tc.classList.remove('drag-ready-pop')}if(canD&&hasD){igC=1;setTimeout(()=>igC=0,200);let rh=tc?tc.parentElement.offsetHeight:40;let timeSinceLast=Date.now()-lastT;let currVel=(timeSinceLast<100&&M.abs(vel)>0.1)?vel*18:0;let currPos=e.clientY-startY;const finalizeSnap=()=>{let finalOffset=currPos%rh;if(finalOffset>rh/2)currPos+=(rh-finalOffset);else if(finalOffset<-rh/2)currPos-=(rh+finalOffset);else currPos-=finalOffset;let aS=M.trunc(currPos/rh);dVO=0;let nH=(startH-aS*3)%24;while(nH<=0)nH+=24;tSH=nH;ASH=tSH;localStorage.setItem('daddys-list-start-hour',ASH);uTL(1);sTCS();H.classList.add('flash-red');setTimeout(()=>H.classList.remove('flash-red'),250);setTimeout(()=>QA('.time-scroller').forEach(s=>s.classList.remove('snap-anim')),500)};const momentumLoop=()=>{if(M.abs(currVel)>0.4){currPos+=currVel;currVel*=0.92;let aS=M.trunc(currPos/rh);dVO=currPos%rh;let nH=(startH-aS*3)%24;while(nH<=0)nH+=24;tSH=nH;uTL(0);requestAnimationFrame(momentumLoop)}else{finalizeSnap()}};if(M.abs(currVel)>1.0){requestAnimationFrame(momentumLoop)}else{finalizeSnap()}}else if(tSH!=ASH||dVO!=0){tSH=ASH;dVO=0;uTL(1);setTimeout(()=>QA('.time-scroller').forEach(s=>s.classList.remove('snap-anim')),500)}D.body.classList.remove('timeline-dragging');canD=hasD=0}};G.addEventListener('pointerup',eD);G.addEventListener('pointercancel',eD);QA('.time').forEach(tc=>tc.addEventListener('click',e=>{e.preventDefault();if(igC)return;let t=Q('#'+tc.getAttribute('for'));if(t){RT.forEach(r=>{if(r!=t)r.checked=0});t.checked=!t.checked;t.dispatchEvent(new Event('change',{bubbles:1}))}}));let rT=null;Q('.dayplan-label').addEventListener('click',()=>{if(H.classList.contains('ready-to-reset')){H.classList.remove('ready-to-reset');CB.forEach(c=>{c.checked=!1});C={poppi:0,yog:0,chz:0,oil:0,len:0,bb:0};FE.forEach(f=>updFTS(f));svS();sTCS();upC();H.classList.add('flash-red');setTimeout(()=>H.classList.remove('flash-red'),250)}else{H.classList.add('ready-to-reset');clearTimeout(rT);rT=setTimeout(()=>H.classList.remove('ready-to-reset'),3000)}});const bD=D.getElementById('vital-big-display');QA('.vital-wheel').forEach((w,i)=>{let mn=parseFloat(w.dataset.min),mx=parseFloat(w.dataset.max),st=parseFloat(w.dataset.step),iF=st%1!==0,pr=iF?st.toString().split('.')[1].length:0,k='vw_'+i,vl=SS[k]!==undefined?parseFloat(SS[k]):parseFloat(w.dataset.val);w.innerHTML=`<div class="vital-wheel-inner"><span></span><span class="v-curr"></span><span></span></div>`;let inr=w.querySelector('.vital-wheel-inner'),sp=inr.querySelectorAll('span'),fmt=v=>iF?v.toFixed(pr):v,up=(v)=>{vl=M.max(mn,M.min(mx,v));sp[0].textContent=fmt(vl-st>=mn?vl-st:mx);sp[1].textContent=fmt(vl);sp[2].textContent=fmt(vl+st<=mx?vl+st:mn);SS[k]=vl;persist();if(i===0){let vw=w.closest('.vital-weight');if(vw)vw.classList.toggle('weight-high',vl>250)}bD.classList.toggle('weight-high',i===0&&vl>250)};up(vl);window.__vwSet=window.__vwSet||[];window.__vwSet[i]=up;let iDg=!1,sY=0,sV=0,lastY=0,lastT=0,vwVel=0,mAF=null;w.addEventListener('pointerdown',e=>{if(mAF){cancelAnimationFrame(mAF);mAF=null}iDg=!0;sY=e.clientY;sV=vl;lastY=e.clientY;lastT=Date.now();vwVel=0;inr.style.transition='none';w.setPointerCapture(e.pointerId);bD.textContent=fmt(vl);bD.classList.toggle('weight-high',i===0&&vl>250);bD.classList.add('active')});w.addEventListener('pointermove',e=>{if(!iDg)return;let nw=Date.now(),dt=nw-lastT;if(dt>0){vwVel=(e.clientY-lastY)/dt;lastY=e.clientY;lastT=nw}let dY=e.clientY-sY,sC=M.floor(M.abs(dY)/15);if(sC>0){let nV=sV-(M.sign(dY)*sC*st);up(nV);bD.textContent=fmt(nV)}});const endDrag=(e)=>{if(!iDg)return;iDg=!1;try{w.releasePointerCapture(e.pointerId)}catch(_){}let tSL=Date.now()-lastT,cVel=(tSL<100&&M.abs(vwVel)>0.1)?vwVel*18:0;if(M.abs(cVel)>1.0){let mBase=vl,mPos=0;const momentumLoop=()=>{if(M.abs(cVel)>0.4){mPos+=cVel;let sC=M.floor(M.abs(mPos)/15);if(sC>0){let nV=mBase-(M.sign(mPos)*sC*st);up(nV);bD.textContent=fmt(nV)}cVel*=0.92;mAF=requestAnimationFrame(momentumLoop)}else{mAF=null;bD.classList.remove('active')}};mAF=requestAnimationFrame(momentumLoop)}else{bD.classList.remove('active')}};w.addEventListener('pointerup',endDrag);w.addEventListener('pointercancel',endDrag)});(()=>{const bpOv=Q('.bp-overlay');if(!bpOv)return;const bpTitle=bpOv.querySelector('.bp-overlay-title'),bpAvgVal=bpOv.querySelector('.bp-avg-val'),bpConfirmBtn=bpOv.querySelector('.bp-confirm-btn'),modalWheels=Array.from(bpOv.querySelectorAll('.vital-wheel')),allWheels=Array.from(QA('.vital-wheel')),modalIdx=modalWheels.map(w=>allWheels.indexOf(w));const bpNumResetEls=Array.from(bpOv.querySelectorAll('.bp-num-reset'));bpNumResetEls.forEach(nEl=>{nEl.addEventListener('click',()=>{const r=parseInt(nEl.dataset.row,10);if(window.__vwSet&&window.__vwSet[modalIdx[r*2]])window.__vwSet[modalIdx[r*2]](120);if(window.__vwSet&&window.__vwSet[modalIdx[r*2+1]])window.__vwSet[modalIdx[r*2+1]](80);nEl.classList.remove('bp-num-reset-pop');void nEl.offsetWidth;nEl.classList.add('bp-num-reset-pop');navigator.vibrate&&navigator.vibrate(12);saveReadings()});});let bpRAF=null;SS.bpRaw=SS.bpRaw||{};const origIdx={am:[1,2],pm:[3,4]};const readModalVals=()=>modalIdx.map(i=>{let v=SS['vw_'+i];return v!==undefined?parseFloat(v):(allWheels[i]?parseFloat(allWheels[i].dataset.val):0)});const updateAvgPreview=()=>{let vals=readModalVals(),sSum=vals[0]+vals[2]+vals[4],dSum=vals[1]+vals[3]+vals[5];bpAvgVal.textContent=`${M.round(sSum/3)}/${M.round(dSum/3)}`};const saveReadings=()=>{let vals=readModalVals(),readings=[[vals[0],vals[1]],[vals[2],vals[3]],[vals[4],vals[5]]],period=window.bpPeriod||'am';SS.bpRaw=SS.bpRaw||{};SS.bpRaw[period]=readings;persist();let sSum=vals[0]+vals[2]+vals[4],dSum=vals[1]+vals[3]+vals[5],avgS=M.round(sSum/3),avgD=M.round(dSum/3),[sysI,diaI]=origIdx[period];if(window.__vwSet&&window.__vwSet[sysI])window.__vwSet[sysI](avgS);if(window.__vwSet&&window.__vwSet[diaI])window.__vwSet[diaI](avgD);updateAvgPreview()};const tickPreview=()=>{if(!G.classList.contains('has-bp')){bpRAF=null;return}updateAvgPreview();bpRAF=requestAnimationFrame(tickPreview)};window.setupBp=(period)=>{window.bpPeriod=period;if(bpTitle)bpTitle.textContent=period==='am'?'AM BP':'PM BP';let saved=SS.bpRaw[period],[sysI,diaI]=origIdx[period],fbS=SS['vw_'+sysI]!==undefined?parseFloat(SS['vw_'+sysI]):120,fbD=SS['vw_'+diaI]!==undefined?parseFloat(SS['vw_'+diaI]):80;for(let r=0;r<3;r++){let vals=(saved&&saved[r])?saved[r]:[fbS,fbD];if(window.__vwSet&&window.__vwSet[modalIdx[r*2]])window.__vwSet[modalIdx[r*2]](vals[0]);if(window.__vwSet&&window.__vwSet[modalIdx[r*2+1]])window.__vwSet[modalIdx[r*2+1]](vals[1])}saveReadings();if(!bpRAF)bpRAF=requestAnimationFrame(tickPreview)};window.__bpOverlayClosed=()=>{if(window.bpPeriod)saveReadings()};if(G.classList.contains('has-bp')){let actPeriod=Q('.cbp-am .chk-prog:checked')?'am':'pm';window.setupBp(actPeriod)}modalWheels.forEach(w=>{w.addEventListener('pointerup',()=>saveReadings());w.addEventListener('pointercancel',()=>saveReadings())});bpConfirmBtn.addEventListener('click',()=>{saveReadings();let period=window.bpPeriod||'am',cell=Q(`.cbp-${period}`);if(cell){const cp=cell.querySelector('.chk-prog'),cd=cell.querySelector('.chk-done');if(cp&&cp.checked){cp.checked=false;cp.dispatchEvent(new Event('change',{bubbles:true}))}if(cd&&!cd.checked){cd.checked=true;cd.dispatchEvent(new Event('change',{bubbles:true}))}}})})();uTL();sTCS();upC();const zGC=D.getElementById('zen-glitch-container'),afs=QA('.affirmation'),cv=D.getElementById('halftone-canvas'),cx=cv.getContext('2d');const wrapChars=el=>{if(!el)return;Array.from(el.childNodes).forEach(n=>{if(n.nodeType===3){const f=D.createDocumentFragment();n.textContent.split('').forEach(ch=>{if(ch===' '){f.appendChild(D.createTextNode(' '))}else{const s=D.createElement('span');s.className='rc';s.textContent=ch;f.appendChild(s)}});n.replaceWith(f)}else if(n.nodeType===1){wrapChars(n)}})};afs.forEach(a=>{const inn=a.querySelector('.affirmation-inner');if(inn){wrapChars(inn.querySelector('h2'))}});let hw,hh,aId,hR=!1,hRs=[],blockStart=performance.now(),rfC=0;const _alphaCache={};const rC=()=>{hw=cv.width=window.innerWidth;hh=cv.height=window.innerHeight};window.addEventListener('resize',rC);rC();
 /* Halftone: every sin/cos that only depends on the column (i) or row (j) is computed once per frame instead of once per dot. Same expressions and operation order, so results are bit-identical. */
-const _XI=[],_A1=[],_C1=[],_CI=[],_YI=[],_B1=[],_D1=[],_SJ=[],_DJ=[];let _hl=0;const rH=(nw)=>{if(hR){const _n=performance.now();if(_n-_hl<(hRs.length?28:44)){aId=requestAnimationFrame(rH);return}_hl=_n}if(!nw)nw=performance.now();cx.clearRect(0,0,hw,hh);const _bk={};if(hRs.length)hRs=hRs.filter(r=>(nw-r.start)<3000);const sp=18,cl=M.ceil(hw/sp)+2,rw=M.ceil(hh/sp)+2,tm=nw*.001,rT=M.min(1,(nw-blockStart)/16000),bT=rT*rT*rT,spdM=1+bT*.5,chA=bT*bT*1.9,tmm=tm*spdM,nR=hRs.length;for(let i=0;i<cl;i++){const x=i*sp,nx=x/hw;_XI[i]=x;_A1[i]=M.sin(nx*5+tmm*1.1);_C1[i]=chA*M.sin(nx*8+tmm*1.7+i*.7);_CI[i]=chA*M.sin(tmm*1.9+i*.9)*2.6;_YI[i]=M.cos(tmm+nx*4)*2.5}for(let j=0;j<rw;j++){const y=j*sp,ny=y/hh;_B1[j]=M.cos(ny*5+tmm*.9);_D1[j]=M.cos(ny*9+tmm*1.4+j*.5);_SJ[j]=M.sin(tmm+ny*4)*2.5;_DJ[j]=chA*M.cos(tmm*1.6+j*.9)*2.6}let _rEl,_rWR;if(nR){_rEl=[];_rWR=[];const wS=M.max(hw,hh)*.38;for(let k=0;k<nR;k++){const el=(nw-hRs[k].start)/1000;_rEl[k]=el;_rWR[k]=el*wS}}for(let i=0;i<cl;i++){const x=_XI[i],a1=_A1[i],c1=_C1[i],ci=_CI[i],yi=_YI[i];for(let j=0;j<rw;j++){const z=a1*_B1[j]+c1*_D1[j]*.5;let dR=1.4+z*.7,dA=.22+z*.14,dX=x+_SJ[j]+ci,dY=j*sp+yi+_DJ[j];if(nR){for(let k=0;k<nR;k++){const r=hRs[k],el=_rEl[k],wR=_rWR[k],dx=dX-r.x,dy=dY-r.y,di=Math.hypot(dx,dy),df=di-wR;if(M.abs(df)<120){let an=M.atan2(dy,dx),inT=M.exp(-(df*df)/1800)*(1-el/3),zD=M.sin(df*.05)*inT;dR+=zD*2.2;dA+=zD*.35;dX+=M.cos(an)*zD*10;dY+=M.sin(an)*zD*10}}}if(dR>.15&&dA>.01){const aKey=M.round(M.min(1,M.max(0,dA))*100);let pth=_bk[aKey];if(!pth)pth=_bk[aKey]=new Path2D();const rr=M.max(.15,dR);pth.moveTo(dX+rr,dY);pth.arc(dX,dY,rr,0,M.PI*2)}}}for(const k in _bk){cx.fillStyle=_alphaCache[k]||(_alphaCache[k]=`rgba(255,255,255,${k/100})`);cx.fill(_bk[k])}if(aA>=0){const ai=afs[aA]&&afs[aA].querySelector('.affirmation-inner');if(ai&&(rfC++%3===0)){const tcx=hw*.5,tcy=hh*.44,tnx=tcx/hw,tny=tcy/hh,ttm=tm*spdM,tz=M.sin(tnx*5+ttm*1.1)*M.cos(tny*5+ttm*.9)+chA*M.sin(tnx*8+ttm*1.7)*M.cos(tny*9+ttm*1.4)*.5;let trip=0;for(let r of hRs){let el=(nw-r.start)/1000,wS=M.max(hw,hh)*.38,wR=el*wS,dx=tcx-r.x,dy=tcy-r.y,di=Math.hypot(dx,dy),df=di-wR;if(M.abs(df)<200)trip+=M.exp(-(df*df)/4500)*(1-el/3)}ai.style.setProperty('--rip-s',(1+bT*.09).toFixed(4));ai.style.setProperty('--rip-cs',(1+bT*.16).toFixed(4));ai.style.setProperty('--rip-b',(bT*1).toFixed(3)+'px');ai.style.setProperty('--rip-y',(-bT*4).toFixed(2)+'px');ai.style.setProperty('--rip-ls-h',(bT*.9).toFixed(2)+'px');ai.style.setProperty('--rip-ls-p',(bT*.6).toFixed(2)+'px')}}if(hR)aId=requestAnimationFrame(rH)};const sH=()=>{if(!hR){hR=!0;requestAnimationFrame(rH)}if(typeof window.startThreeAnim==='function')window.startThreeAnim();setTopBarDim(true)};const stH=()=>{hR=!1;cancelAnimationFrame(aId);if(typeof window.stopThreeAnim==='function')window.stopThreeAnim()};const setTopBarDim=(on)=>{D.body.classList.toggle('zen-top-dim',on);updThemeColor()};let aA=-1,fOT,nTT,lM="normal";const hA=()=>{zGC.style.opacity='0';zGC.style.pointerEvents='none';setTimeout(stH,800);setTopBarDim(false)};const tA=()=>{if(performance.now()<180000){clearTimeout(nTT);nTT=setTimeout(tA,180000-performance.now()+50);return}if(aA>=0)afs[aA].classList.remove('active');if(lM==="paused")return;aA=aA<0?0:(aA+1)%afs.length;afs[aA].classList.add('active');blockStart=performance.now();zGC.style.opacity='1';zGC.style.pointerEvents='auto';sH();clearTimeout(fOT);fOT=setTimeout(hA,lM==="fast"?9000:11500);clearTimeout(nTT);let nD=lM==="fast"?10000:(M.floor(M.random()*70000)+20000);nTT=setTimeout(tA,nD)};window.uA=()=>{let sD=Q('.is-sleep .chk-done')?.checked,sP=Q('.is-sleep .chk-prog')?.checked,nM="normal";if(sD)nM="paused";else if(sP)nM="fast";if(lM!==nM){lM=nM;clearTimeout(nTT);clearTimeout(fOT);if(lM==="paused"){hA();if(aA>=0)afs[aA].classList.remove('active')}else{let iD=lM==="fast"?0:(M.floor(M.random()*20000)+10000);nTT=setTimeout(tA,iD)}}};if(afs.length>0){let iD=6000;nTT=setTimeout(tA,iD)}let tC=0,tT;zGC.addEventListener('pointerdown',(e)=>{tC++;clearTimeout(tT);if(tC>=3){clearTimeout(fOT);hA();if(aA>=0)afs[aA].classList.remove('active');tC=0}else{tT=setTimeout(()=>{tC=0},600)}});const RIPPLE_GRID=750;D.addEventListener('pointerdown',e=>{const px=e.clientX,py=e.clientY,wait=RIPPLE_GRID-(performance.now()%RIPPLE_GRID);setTimeout(()=>{hRs.push({x:px,y:py,start:performance.now()});let rp=D.createElement('div');rp.className='ambient-ripple';rp.style.left=px+'px';rp.style.top=py+'px';D.body.appendChild(rp);if(aA>=0&&zGC.style.opacity==='1'){let aI=afs[aA].querySelector('.affirmation-inner');if(aI){aI.classList.remove('ripple-text-fx');void aI.offsetWidth;aI.classList.add('ripple-text-fx')}}setTimeout(()=>rp.remove(),3000)},wait)});</script>
+const _XI=[],_A1=[],_C1=[],_CI=[],_YI=[],_B1=[],_D1=[],_SJ=[],_DJ=[];let _hl=0;const rH=(nw)=>{if(hR){const _n=performance.now();if(_n-_hl<(hRs.length?28:44)){aId=requestAnimationFrame(rH);return}_hl=_n}if(!nw)nw=performance.now();cx.clearRect(0,0,hw,hh);const _bk={};if(hRs.length)hRs=hRs.filter(r=>(nw-r.start)<3000);const sp=18,cl=M.ceil(hw/sp)+2,rw=M.ceil(hh/sp)+2,tm=nw*.001,rT=M.min(1,(nw-blockStart)/16000),bT=rT*rT*rT,spdM=1+bT*.5,chA=bT*bT*1.9,tmm=tm*spdM,nR=hRs.length;for(let i=0;i<cl;i++){const x=i*sp,nx=x/hw;_XI[i]=x;_A1[i]=M.sin(nx*5+tmm*1.1);_C1[i]=chA*M.sin(nx*8+tmm*1.7+i*.7);_CI[i]=chA*M.sin(tmm*1.9+i*.9)*2.6;_YI[i]=M.cos(tmm+nx*4)*2.5}for(let j=0;j<rw;j++){const y=j*sp,ny=y/hh;_B1[j]=M.cos(ny*5+tmm*.9);_D1[j]=M.cos(ny*9+tmm*1.4+j*.5);_SJ[j]=M.sin(tmm+ny*4)*2.5;_DJ[j]=chA*M.cos(tmm*1.6+j*.9)*2.6}let _rEl,_rWR;if(nR){_rEl=[];_rWR=[];const wS=M.max(hw,hh)*.38;for(let k=0;k<nR;k++){const el=(nw-hRs[k].start)/1000;_rEl[k]=el;_rWR[k]=el*wS}}for(let i=0;i<cl;i++){const x=_XI[i],a1=_A1[i],c1=_C1[i],ci=_CI[i],yi=_YI[i];for(let j=0;j<rw;j++){const z=a1*_B1[j]+c1*_D1[j]*.5;let dR=1.4+z*.7,dA=.22+z*.14,dX=x+_SJ[j]+ci,dY=j*sp+yi+_DJ[j];if(nR){for(let k=0;k<nR;k++){const r=hRs[k],el=_rEl[k],wR=_rWR[k],dx=dX-r.x,dy=dY-r.y,di=Math.hypot(dx,dy),df=di-wR;if(M.abs(df)<120){let an=M.atan2(dy,dx),inT=M.exp(-(df*df)/1800)*(1-el/3),zD=M.sin(df*.05)*inT;dR+=zD*2.2;dA+=zD*.35;dX+=M.cos(an)*zD*10;dY+=M.sin(an)*zD*10}}}if(dR>.15&&dA>.01){const aKey=M.round(M.min(1,M.max(0,dA))*100);let pth=_bk[aKey];if(!pth)pth=_bk[aKey]=new Path2D();const rr=M.max(.15,dR);pth.moveTo(dX+rr,dY);pth.arc(dX,dY,rr,0,M.PI*2)}}}for(const k in _bk){cx.fillStyle=_alphaCache[k]||(_alphaCache[k]=`rgba(255,255,255,${k/100})`);cx.fill(_bk[k])}if(aA>=0){const ai=afs[aA]&&afs[aA].querySelector('.affirmation-inner');if(ai&&(rfC++%3===0)){const tcx=hw*.5,tcy=hh*.44,tnx=tcx/hw,tny=tcy/hh,ttm=tm*spdM,tz=M.sin(tnx*5+ttm*1.1)*M.cos(tny*5+ttm*.9)+chA*M.sin(tnx*8+ttm*1.7)*M.cos(tny*9+ttm*1.4)*.5;let trip=0;for(let r of hRs){let el=(nw-r.start)/1000,wS=M.max(hw,hh)*.38,wR=el*wS,dx=tcx-r.x,dy=tcy-r.y,di=Math.hypot(dx,dy),df=di-wR;if(M.abs(df)<200)trip+=M.exp(-(df*df)/4500)*(1-el/3)}ai.style.setProperty('--rip-s',(1+bT*.09).toFixed(4));ai.style.setProperty('--rip-cs',(1+bT*.16).toFixed(4));ai.style.setProperty('--rip-b',(bT*1).toFixed(3)+'px');ai.style.setProperty('--rip-y',(-bT*4).toFixed(2)+'px');ai.style.setProperty('--rip-ls-h',(bT*.9).toFixed(2)+'px');ai.style.setProperty('--rip-ls-p',(bT*.6).toFixed(2)+'px')}}if(hR)aId=requestAnimationFrame(rH)};const sH=()=>{if(!hR){hR=!0;requestAnimationFrame(rH)}if(typeof window.startThreeAnim==='function')window.startThreeAnim();setTopBarDim(true)};const stH=()=>{hR=!1;cancelAnimationFrame(aId);if(typeof window.stopThreeAnim==='function')window.stopThreeAnim()};const setTopBarDim=(on)=>{D.body.classList.toggle('zen-top-dim',on);updThemeColor()};let aA=-1,fOT,nTT,lM="normal";const hA=()=>{zGC.style.opacity='0';zGC.style.pointerEvents='none';setTimeout(stH,800);setTopBarDim(false)};const tA=()=>{if(performance.now()<180000){clearTimeout(nTT);nTT=setTimeout(tA,180000-performance.now()+50);return}if(aA>=0)afs[aA].classList.remove('active');if(lM==="paused")return;aA=aA<0?0:(aA+1)%afs.length;{const _ri=afs[aA].querySelector('.affirmation-inner');if(_ri)_ri.classList.remove('ripple-text-fx')}afs[aA].classList.add('active');blockStart=performance.now();zGC.style.opacity='1';zGC.style.pointerEvents='auto';sH();clearTimeout(fOT);fOT=setTimeout(hA,lM==="fast"?9000:11500);clearTimeout(nTT);let nD=lM==="fast"?10000:(M.floor(M.random()*70000)+20000);nTT=setTimeout(tA,nD)};window.uA=()=>{let sD=Q('.is-sleep .chk-done')?.checked,sP=Q('.is-sleep .chk-prog')?.checked,nM="normal";if(sD)nM="paused";else if(sP)nM="fast";if(lM!==nM){lM=nM;clearTimeout(nTT);clearTimeout(fOT);if(lM==="paused"){hA();if(aA>=0)afs[aA].classList.remove('active')}else{let iD=lM==="fast"?0:(M.floor(M.random()*20000)+10000);nTT=setTimeout(tA,iD)}}};if(afs.length>0){let iD=6000;nTT=setTimeout(tA,iD)}let tC=0,tT;zGC.addEventListener('pointerdown',(e)=>{tC++;clearTimeout(tT);if(tC>=3){clearTimeout(fOT);hA();if(aA>=0)afs[aA].classList.remove('active');tC=0}else{tT=setTimeout(()=>{tC=0},600)}});const RIPPLE_GRID=750;D.addEventListener('pointerdown',e=>{const px=e.clientX,py=e.clientY,wait=RIPPLE_GRID-(performance.now()%RIPPLE_GRID);setTimeout(()=>{hRs.push({x:px,y:py,start:performance.now()});let rp=D.createElement('div');rp.className='ambient-ripple';rp.style.left=px+'px';rp.style.top=py+'px';D.body.appendChild(rp);if(aA>=0&&zGC.style.opacity==='1'){let aI=afs[aA].querySelector('.affirmation-inner');if(aI){aI.classList.remove('ripple-text-fx');void aI.offsetWidth;aI.classList.add('ripple-text-fx')}}setTimeout(()=>rp.remove(),3000)},wait)});</script>
 <script>(function(){
 /* [S0L] HISTORY: at day rollover a snapshot of the finished day is saved into daddys-list-history (HIST_KEY) and the history view is built from it. Rewards reads the same key for the 3-miss rule. */
 const HIST_KEY='daddys-list-history';
@@ -1225,6 +1230,7 @@ document.addEventListener('click',function(e){
 },true);
 m.querySelector('.cm-yes').addEventListener('click',function(){
   const f=cell();hide();if(!f)return;
+  window.__dlNextKind='poop';clearTimeout(window.__dlNK);window.__dlNK=setTimeout(function(){window.__dlNextKind=null},3500);
   const cd=f.querySelector('.chk-done');
   if(cd&&!cd.checked){cd.checked=true;cd.dispatchEvent(new Event('change',{bubbles:true}));}
   navigator.vibrate&&navigator.vibrate([12,45,12]);
@@ -1281,6 +1287,60 @@ m.querySelector('.cm-yes').addEventListener('click',function(){
 });
 m.addEventListener('click',function(e){if(e.target===m){target=null;hide();}});
 })();
+</script>
+<script>
+/* [S0L] COW UNLOCK (Oct 14, 2026): the 3D cow is a secret unlockable that DADDY MUST APPROVE. It stays out of the random +points rotation until it is unlocked (localStorage daddys-list-cow-unlocked='1', permanent, synced). TWO WAYS TO ASK DADDY: (A) CHORES: she checks BOTH the Shower cell (data-fid groom-shower) and Brush Teeth cell (brush-teeth-r17) done -> daddys-list-cow-pending='1'; (B) GUESSING: in the teaser popup she can type a guess at what the unlockable is. Guess 1-3 are free, every guess after that costs 1 point (daddys-list-points-adj minus 1; she needs at least 1 point). The count is daddys-list-cow-guesses, the list daddys-list-cow-guess-log. A guess that matches the cow family (cow, moo, cattle, bull, calf, milk, udder, etc., see RIGHT) is NOT unlocked on the spot: it stores the text in daddys-list-cow-guess-pending and waits for Daddy. Daddy's device (__dl_role=daddy) gets a popup for either ask: Approve (sets unlocked, clears both asks), Not yet (clears the ask; chores ask stores daddys-list-cow-declined=today, guess ask stores daddys-list-cow-guess-declined=today so the same right guess is not re-asked that day) or Later. Meds do NOT trigger the cow. Once unlocked the cow is one of six kinds fly() picks at random. POPUPS (same #cow-unlock look): TEASER (once a day per device via dl-cow-teaser-v1, and any time from the round gift button #cow-gbtn at bottom-left on HER device while locked; says a secret new animation exists, what earns it, and has the guess box; does NOT say cow); WAITING (after both chores); UNLOCKED (names the cow, once per device via dl-cow-seen-v1, never on Daddy's device). */
+(function(){var K='daddys-list-cow-unlocked',PEND='daddys-list-cow-pending',DECL='daddys-list-cow-declined',GP='daddys-list-cow-guess-pending',GD='daddys-list-cow-guess-declined',GC='daddys-list-cow-guesses',GL='daddys-list-cow-guess-log',ADJ='daddys-list-points-adj',FREE=3,SEEN='dl-cow-seen-v1',TSEEN='dl-cow-teaser-v1',NEED=['groom-shower','brush-teeth-r17'],shown=false,asked='';
+var RIGHT=/\bcow+s?\b|\bmo{2,}\b|cattle|bovine|\bbulls?\b|\box(en)?\b|\bcalf\b|\bcalves\b|\bheifers?\b|\bsteers?\b|udder|dairy|\bmilk(ing|y)?\b|\bcuds?\b|\bbeef\b|holstein|hereford|angus|bessie|cowgirl|cowboy|\u{1F404}|\u{1F42E}|\u{1F402}|\u{1F403}/iu;
+function g(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function put(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function del(k){try{localStorage.removeItem(k)}catch(e){}}
+function adm(){return g('__dl_role')==='daddy'}
+function today(){var d=new Date();return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
+function done(id){var f=document.querySelector('form.cell[data-fid="'+id+'"]'),d=f&&f.querySelector('.chk-done');return !!(d&&d.checked)}
+function pts(){var el=document.getElementById('pts-total'),n=el?parseFloat(el.textContent):NaN;return isNaN(n)?0:n}
+function nG(){return parseInt(g(GC)||'0',10)||0}
+function esc(t){var d=document.createElement('div');d.textContent=t;return d.innerHTML}
+function box(inner,btns,init){if(document.getElementById('cow-unlock'))return false;
+ var st=document.createElement('style');st.textContent='#cow-unlock{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);font-family:system-ui,-apple-system,sans-serif}#cow-unlock .cu{width:min(92vw,360px);box-sizing:border-box;text-align:center;color:#fff;background:linear-gradient(160deg,#2b1747,#10102a);border:3px solid #ffd54a;border-radius:22px;padding:26px 20px 22px;box-shadow:0 0 0 4px rgba(255,213,74,.25),0 0 46px rgba(255,213,74,.55);animation:cuin .5s cubic-bezier(.2,1.4,.4,1) both,cupulse 1.6s ease-in-out .5s infinite}#cow-unlock .ci{font-size:64px;line-height:1;animation:cubob 1.2s ease-in-out infinite}#cow-unlock .ct{margin:10px 0 2px;font-size:15px;font-weight:800;letter-spacing:.18em;color:#ffd54a}#cow-unlock h2{margin:0 0 10px;font-size:30px;line-height:1.1;font-weight:900;text-transform:uppercase}#cow-unlock p{margin:0 0 8px;font-size:17px;line-height:1.35}#cow-unlock .cn{font-weight:800;color:#ffd54a}#cow-unlock button{margin-top:12px;width:100%;padding:14px;border:0;border-radius:14px;font-size:18px;font-weight:900;color:#2b1747;background:#ffd54a;cursor:pointer}@keyframes cuin{from{transform:scale(.4) rotate(-6deg);opacity:0}to{transform:none;opacity:1}}@keyframes cupulse{50%{box-shadow:0 0 0 4px rgba(255,213,74,.4),0 0 70px rgba(255,213,74,.9)}}@keyframes cubob{50%{transform:translateY(-8px) scale(1.08)}}.cu .cl{display:flex;gap:10px;justify-content:center;margin:12px 0 4px}.cu .cl b{flex:1;padding:10px 6px;border-radius:12px;font-size:16px;background:rgba(255,255,255,.1);border:2px solid rgba(255,255,255,.35)}.cu .cl b.y{background:rgba(80,220,120,.25);border-color:#5bdc86}.cu input{width:100%;box-sizing:border-box;margin:10px 0 4px;padding:12px;border-radius:12px;border:2px solid #ffd54a;background:rgba(255,255,255,.1);color:#fff;font-size:17px;text-align:center;outline:0}.cu input::placeholder{color:rgba(255,255,255,.5)}.cu .gm{min-height:22px;font-size:15px;font-weight:700;color:#ffd54a;margin:2px 0 4px}.cu .gm.bad{color:#ff8a8a}#cow-gbtn{position:fixed;left:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:100000;width:48px;height:48px;border-radius:50%;border:2px solid #ffd54a;background:#2b1747;font-size:24px;line-height:1;padding:0;cursor:pointer;box-shadow:0 0 14px rgba(255,213,74,.7);animation:cubob 1.6s ease-in-out infinite}';
+ var o=document.createElement('div');o.id='cow-unlock';o.setAttribute('role','dialog');o.setAttribute('aria-modal','true');
+ o.innerHTML='<div class="cu">'+inner+btns.map(function(b,i){return '<button type="button" data-i="'+i+'"'+(b.sec?' style="background:transparent;color:#fff;border:2px solid rgba(255,255,255,.5);font-size:16px"':'')+'>'+b.t+'</button>'}).join('')+'</div>';
+ o.appendChild(st);document.body.appendChild(o);try{navigator.vibrate&&navigator.vibrate([30,40,30,40,80])}catch(e){}
+ o.addEventListener('click',function(e){var bt=e.target.closest&&e.target.closest('button');if(!bt)return;var b=btns[+bt.getAttribute('data-i')];if(b&&b.f)b.f(o);if(!(b&&b.keep))o.remove()});if(init)init(o);return true}
+function pop(){if(shown||g(SEEN)==='1')return;if(adm()){put(SEEN,'1');return}
+ shown=box('<div class="ci">🐮✨</div><div class="ct">🎉 UNLOCKED 🎉</div><h2>A COW points animation!</h2><p>Daddy approved it! The <span class="cn">cow</span> just unlocked.</p><p>It is in the mix now. <span class="cn">Keep earning points to see it!</span></p>',[{t:'Yay!',f:function(){put(SEEN,'1')}}])}
+function waiting(){box('<div class="ci">⏳🎁</div><div class="ct">✅ BOTH DONE ✅</div><h2>Waiting for Daddy!</h2><p>You finished <span class="cn">Shower</span> and <span class="cn">Brush Teeth</span>! Daddy has to approve it, then your <span class="cn">secret new animation</span> unlocks.</p>',[{t:'Okay!'}]);put(TSEEN,today())}
+function waitingGuess(){box('<div class="ci">🎯⏳</div><div class="ct">🎉 YOU GUESSED IT 🎉</div><h2>Waiting for Daddy!</h2><p>That was <span class="cn">right</span>! Daddy has to approve it before it unlocks. He is being told right now.</p>',[{t:'Yay!'}])}
+function gmsg(){var n=nG(),left=Math.max(0,FREE-n);return left>0?left+' free guess'+(left===1?'':'es')+' left':'Each guess costs 1 point (you have '+Math.floor(pts())+')'}
+function guess(o){var inp=o.querySelector('#cu-g'),m=o.querySelector('#cu-gm'),t=(inp.value||'').trim().slice(0,40);
+ function say(x,bad){m.textContent=x;m.className='gm'+(bad?' bad':'')}
+ if(!t){say('Type a guess first',1);return}
+ if(g(GP)){say('Your right guess is waiting for Daddy!');return}
+ var n=nG();
+ if(n>=FREE){if(pts()<1){say('You need 1 point to guess',1);return}put(ADJ,String((parseInt(g(ADJ)||'0',10)||0)-1))}
+ put(GC,String(n+1));
+ var log=[];try{log=JSON.parse(g(GL))||[]}catch(e){}log.push(t);put(GL,JSON.stringify(log.slice(-20)));
+ inp.value='';
+ if(RIGHT.test(t)){if(g(GD)===today()){say('Daddy said not yet today. Do your tasks!',0);return}put(GP,t);o.remove();waitingGuess();return}
+ say('Nope, not that! '+gmsg(),1)}
+function teaser(force){if(adm()||g(K)==='1')return;if(!force&&(g(PEND)==='1'||g(GP)||g(TSEEN)===today()))return;
+ if(g(GP)){waitingGuess();return}
+ if(g(PEND)==='1'){box('<div class="ci">⏳🎁</div><div class="ct">✅ BOTH DONE ✅</div><h2>Waiting for Daddy!</h2><p>Daddy has to approve it, then your <span class="cn">secret new animation</span> unlocks.</p>',[{t:'Okay!'}]);return}
+ var a=done(NEED[0]),b=done(NEED[1]);
+ box('<div class="ci">🎁❓</div><div class="ct">🔒 SECRET UNLOCKABLE 🔒</div><h2>A mystery new points animation!</h2><p>There is a <span class="cn">secret new animation</span> hiding in your points, and you can unlock it <span class="cn">forever</span>.</p><p>Do <span class="cn">both</span> of these, then Daddy approves it:</p><div class="cl"><b class="'+(a?'y':'')+'">'+(a?'✅':'⬜')+' Shower</b><b class="'+(b?'y':'')+'">'+(b?'✅':'⬜')+' Brush Teeth</b></div><p>Or <span class="cn">guess what it is!</span></p><input id="cu-g" type="text" maxlength="40" autocomplete="off" placeholder="Your guess..."><div class="gm" id="cu-gm">'+gmsg()+'</div>',[{t:'Guess!',keep:1,f:guess},{t:'Close',sec:1,f:function(){put(TSEEN,today())}}],function(o){var i=o.querySelector('#cu-g');i.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();guess(o)}})})}
+function askAdmin(){if(!adm()||g(K)==='1')return;var gp=g(GP),kind=gp?'g:'+gp:g(PEND)==='1'?'c':'';if(!kind||asked===kind)return;
+ function ok(){put(K,'1');del(PEND);del(GP);del(DECL);put(SEEN,'1')}
+ var inner=gp?'<div class="ci">🎯🐮</div><div class="ct">⏳ WAITING FOR YOU ⏳</div><h2>She guessed it!</h2><p>She typed: <span class="cn">'+esc(gp)+'</span></p><p>That is the right idea. Approve unlocking the <span class="cn">cow</span> points animation for her, forever?</p>':'<div class="ci">🐮❓</div><div class="ct">⏳ WAITING FOR YOU ⏳</div><h2>Approve her unlockable?</h2><p>She finished <span class="cn">Shower</span> and <span class="cn">Brush Teeth</span>. Approving unlocks the <span class="cn">cow</span> points animation for her, forever.</p>';
+ if(box(inner,[{t:'Approve',f:ok},{t:'Not yet',sec:1,f:function(){if(gp){del(GP);put(GD,today())}else{del(PEND);put(DECL,today())}}},{t:'Later',sec:1}]))asked=kind}
+function btn(){var b=document.getElementById('cow-gbtn'),on=!adm()&&g(K)!=='1';if(!on){if(b)b.remove();return}
+ if(b||!document.body)return;b=document.createElement('button');b.id='cow-gbtn';b.type='button';b.setAttribute('aria-label','Secret unlockable');b.textContent='🎁';
+ var st=document.createElement('style');st.textContent='#cow-unlock{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);font-family:system-ui,-apple-system,sans-serif}#cow-unlock .cu{width:min(92vw,360px);box-sizing:border-box;text-align:center;color:#fff;background:linear-gradient(160deg,#2b1747,#10102a);border:3px solid #ffd54a;border-radius:22px;padding:26px 20px 22px;box-shadow:0 0 0 4px rgba(255,213,74,.25),0 0 46px rgba(255,213,74,.55);animation:cuin .5s cubic-bezier(.2,1.4,.4,1) both,cupulse 1.6s ease-in-out .5s infinite}#cow-unlock .ci{font-size:64px;line-height:1;animation:cubob 1.2s ease-in-out infinite}#cow-unlock .ct{margin:10px 0 2px;font-size:15px;font-weight:800;letter-spacing:.18em;color:#ffd54a}#cow-unlock h2{margin:0 0 10px;font-size:30px;line-height:1.1;font-weight:900;text-transform:uppercase}#cow-unlock p{margin:0 0 8px;font-size:17px;line-height:1.35}#cow-unlock .cn{font-weight:800;color:#ffd54a}#cow-unlock button{margin-top:12px;width:100%;padding:14px;border:0;border-radius:14px;font-size:18px;font-weight:900;color:#2b1747;background:#ffd54a;cursor:pointer}@keyframes cuin{from{transform:scale(.4) rotate(-6deg);opacity:0}to{transform:none;opacity:1}}@keyframes cupulse{50%{box-shadow:0 0 0 4px rgba(255,213,74,.4),0 0 70px rgba(255,213,74,.9)}}@keyframes cubob{50%{transform:translateY(-8px) scale(1.08)}}.cu .cl{display:flex;gap:10px;justify-content:center;margin:12px 0 4px}.cu .cl b{flex:1;padding:10px 6px;border-radius:12px;font-size:16px;background:rgba(255,255,255,.1);border:2px solid rgba(255,255,255,.35)}.cu .cl b.y{background:rgba(80,220,120,.25);border-color:#5bdc86}.cu input{width:100%;box-sizing:border-box;margin:10px 0 4px;padding:12px;border-radius:12px;border:2px solid #ffd54a;background:rgba(255,255,255,.1);color:#fff;font-size:17px;text-align:center;outline:0}.cu input::placeholder{color:rgba(255,255,255,.5)}.cu .gm{min-height:22px;font-size:15px;font-weight:700;color:#ffd54a;margin:2px 0 4px}.cu .gm.bad{color:#ff8a8a}#cow-gbtn{position:fixed;left:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:100000;width:48px;height:48px;border-radius:50%;border:2px solid #ffd54a;background:#2b1747;font-size:24px;line-height:1;padding:0;cursor:pointer;box-shadow:0 0 14px rgba(255,213,74,.7);animation:cubob 1.6s ease-in-out infinite}';if(!document.getElementById('cow-gstyle')){st.id='cow-gstyle';document.head.appendChild(st)}
+ b.addEventListener('click',function(){teaser(true)});document.body.appendChild(b)}
+function chk(){if(g(K)==='1'){if(g(SEEN)!=='1')setTimeout(pop,2400);return}
+ if(g(PEND)==='1'||g(DECL)===today())return;
+ if(NEED.every(done)){put(PEND,'1');if(!adm())setTimeout(waiting,2400)}}
+document.addEventListener('change',function(e){var t=e.target;if(t&&t.classList&&t.classList.contains('chk-done'))setTimeout(chk,0)},true);
+setTimeout(chk,1500);setTimeout(teaser,3200);setTimeout(askAdmin,2000);setTimeout(btn,1000);setInterval(function(){askAdmin();btn();if(g(K)==='1'&&g(SEEN)!=='1')chk()},4000)})();
 </script>
 <div id="tip-modal" role="dialog" aria-modal="true" aria-labelledby="tm-title"><div class="cm-card"><h2 id="tm-title"></h2><p id="tm-text"></p><button type="button" class="cm-yes">Got it</button></div></div>
 <script>
@@ -1724,7 +1784,7 @@ function mcHTML(){
  load();
  var cn={t:0,u:0,w:0},i;
  for(i=0;i<ITEMS.length;i++){if((ITEMS[i].c?1:0)!==cat)continue;cn[stat(i)]++;if(stat(i)!=='u'&&inU(i))cn.u++}
- var h='<div class="mc-info"><span class="mc-pts">+3</span><b>New movie with daddy</b>'+(localStorage.getItem('__dl_role')==='daddy'?'<button type="button" class="mc-exp" data-exp="1">EXPORT</button>':'')+'<button type="button" class="mc-x" data-x="1" aria-label="Close">&#10005;</button></div><div class="mc-cats"><button type="button" data-cat="0" class="'+(cat===0?'on':'')+'">MOTION COMICS</button><button type="button" data-cat="1" class="'+(cat===1?'on':'')+'">MOTION PICTURES</button></div><div class="mc-tabs">'+TABK.map(function(k,ti){return '<button type="button" data-tab="'+ti+'" data-k="'+k+'" class="'+(tab===ti?'on':'')+'"><b>'+cn[k]+'</b><span>'+TABL[k]+'</span></button>'}).join('')+'</div>';
+ var h='<div class="mc-info"><span class="mc-pts">+3</span><b>New movie with daddy</b>'+(localStorage.getItem('__dl_role')==='daddy'?'<button type="button" class="mc-exp" data-exp="1">EXPORT</button>':'')+'<button type="button" class="mc-x" data-x="1" aria-label="Close">&#10005;</button></div><div class="mc-cats"><button type="button" data-cat="0" class="'+(cat===0?'on':'')+'">MOTION COMICS</button><button type="button" data-cat="1" class="'+(cat===1?'on':'')+'">MOTION PICTURES</button><button type="button" data-cat="2" class="mc-games">GAMES</button></div><div class="mc-tabs">'+TABK.map(function(k,ti){return '<button type="button" data-tab="'+ti+'" data-k="'+k+'" class="'+(tab===ti?'on':'')+'"><b>'+cn[k]+'</b><span>'+TABL[k]+'</span></button>'}).join('')+'</div>';
  h+='<div class="mc-key"><span class="l">GF RATING</span>'+GR.map(function(g){return '<span class="g g-'+g+'">'+g+'</span>'}).join('')+'</div>';
  h+='<div class="mc-list"><div class="mc-banner">'+(cat?'MOTION PICTURES':'COLLECTION 1 · BEGINNING')+'</div>';
  var lastE=null,lastB=null,any=false;
@@ -2023,6 +2083,26 @@ html:has(#theme-driver:checked)::after{opacity:.4}
 #theme-driver~.board .cell.time.pulse-rg,#theme-driver~.board .cell.time.pulse-r2g1,
 #theme-driver~.board .cell.time.pulse-r1g2{animation-timing-function:steps(24,end)!important}
 .affirmation-inner,.affirmation-inner h2 .rc{transition:none!important}
+/* [S0L] SUPPORTIVE TEXT BUBBLE-BURST (Oct 13, 2026). Each supportive message now starts as tiny text trapped inside a wobbling soap bubble. The bubble swells, POPS, and the text explodes outward past full size, springs back, and settles. Letters of the title fling out separately and a ring of droplets shoots away. Pop moment = 64% of 1.9s (1.216s) for the bubble, text, letters and ring; the 12s fade-out is unchanged. */
+.affirmation{--bb:clamp(150px,34vw,220px)}
+.affirmation.active{animation:bbFade 12s linear forwards}
+@keyframes bbFade{0%{opacity:0;filter:blur(0);transform:scale(.94)}1%{opacity:1;filter:blur(0);transform:scale(.94)}85%{opacity:1;filter:blur(0);transform:scale(1.03)}100%{opacity:0;filter:blur(5px);transform:scale(1.08)}}
+.affirmation::before,.affirmation::after{content:'';position:absolute;left:50%;top:50%;width:var(--bb);height:var(--bb);translate:-50% -50%;border-radius:50%;pointer-events:none;z-index:3;opacity:0;scale:0}
+.affirmation::before{background:radial-gradient(circle at 30% 26%,rgba(255,255,255,.7) 0,rgba(255,255,255,.18) 9%,transparent 22%),radial-gradient(circle at 70% 78%,rgba(255,255,255,.22) 0,transparent 16%),radial-gradient(circle at 50% 50%,rgba(120,220,255,.05) 52%,rgba(0,232,200,.2) 74%,rgba(180,120,255,.3) 88%,rgba(255,150,210,.5) 97%,rgba(255,255,255,.65) 100%);box-shadow:inset 0 0 22px rgba(255,255,255,.28),0 0 30px rgba(0,232,200,.3)}
+.affirmation::after{border:3px solid rgba(255,255,255,.8);box-shadow:calc(var(--bb)*0.6) calc(var(--bb)*0.0) 0 calc(var(--bb)/-2 + 5px) rgba(255,255,255,.95),calc(var(--bb)*0.6) calc(var(--bb)*0.319) 0 calc(var(--bb)/-2 + 7px) rgba(0,232,200,.95),calc(var(--bb)*0.368) calc(var(--bb)*0.665) 0 calc(var(--bb)/-2 + 9px) rgba(239,68,68,.9),calc(var(--bb)*-0.021) calc(var(--bb)*0.6) 0 calc(var(--bb)/-2 + 5px) rgba(255,255,255,.95),calc(var(--bb)*-0.35) calc(var(--bb)*0.583) 0 calc(var(--bb)/-2 + 7px) rgba(0,232,200,.95),calc(var(--bb)*-0.671) calc(var(--bb)*0.357) 0 calc(var(--bb)/-2 + 9px) rgba(239,68,68,.9),calc(var(--bb)*-0.6) calc(var(--bb)*-0.01) 0 calc(var(--bb)/-2 + 5px) rgba(255,255,255,.95),calc(var(--bb)*-0.57) calc(var(--bb)*-0.37) 0 calc(var(--bb)/-2 + 7px) rgba(0,232,200,.95),calc(var(--bb)*-0.38) calc(var(--bb)*-0.658) 0 calc(var(--bb)/-2 + 9px) rgba(239,68,68,.9),calc(var(--bb)*0.01) calc(var(--bb)*-0.6) 0 calc(var(--bb)/-2 + 5px) rgba(255,255,255,.95),calc(var(--bb)*0.36) calc(var(--bb)*-0.577) 0 calc(var(--bb)/-2 + 7px) rgba(0,232,200,.95),calc(var(--bb)*0.677) calc(var(--bb)*-0.345) 0 calc(var(--bb)/-2 + 9px) rgba(239,68,68,.9),0 0 22px rgba(0,232,200,.55)}
+.affirmation.active::before{animation:bbBubble 1.9s linear both}
+.affirmation.active::after{animation:bbRing 1.1s cubic-bezier(.1,.7,.3,1) 1.2s both}
+.affirmation.active .affirmation-inner{animation:bbBurst 1.9s linear backwards}
+.affirmation.active .affirmation-inner p{animation:bbBlur 1.9s linear backwards}
+.affirmation.active .affirmation-inner h2 .rc{animation:bbChar 1.9s linear backwards}
+@keyframes bbBubble{0%{scale:0;opacity:0}8%{scale:.5;opacity:1}20%{scale:.74 .66}34%{scale:.7 .78}46%{scale:.86 .78}56%{scale:.88 .96}62%{scale:1.02 .95}64%{scale:1.14;opacity:1}66%{scale:1.4;opacity:.85}78%{scale:1.95;opacity:0}100%{scale:2.2;opacity:0}}
+@keyframes bbBurst{0%{scale:.03;opacity:0}8%{scale:.1;opacity:.85;animation-timing-function:ease-in-out}30%{scale:.14}50%{scale:.17}62%{scale:.2;opacity:.9;animation-timing-function:cubic-bezier(.1,.9,.3,1)}64%{scale:.22;opacity:1;animation-timing-function:cubic-bezier(.1,.9,.3,1)}72%{scale:1.42;animation-timing-function:ease-in-out}82%{scale:.93}91%{scale:1.05}100%{scale:1;opacity:1}}
+@keyframes bbBlur{0%,62%{filter:blur(2px)}70%{filter:blur(7px)}84%,100%{filter:blur(0)}}
+@keyframes bbChar{0%,63%{translate:0 0;rotate:0deg;scale:1}72%{translate:calc(var(--dx,0px)*1.3) calc(var(--dy,0px)*1.3);rotate:var(--dr,0deg);scale:1.7}84%{translate:calc(var(--dx,0px)*-.12) calc(var(--dy,0px)*-.12);rotate:calc(var(--dr,0deg)*-.15);scale:.92}100%{translate:0 0;rotate:0deg;scale:1}}
+@keyframes bbRing{0%{scale:.55;opacity:0}8%{opacity:1}100%{scale:2.8;opacity:0}}
+.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+1){--dx:-70px;--dy:-60px;--dr:-40deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+2){--dx:40px;--dy:-90px;--dr:35deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+3){--dx:-20px;--dy:-80px;--dr:-25deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+4){--dx:85px;--dy:-30px;--dr:50deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+5){--dx:-90px;--dy:20px;--dr:-55deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+6){--dx:60px;--dy:65px;--dr:30deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+7){--dx:-40px;--dy:75px;--dr:-35deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+8){--dx:10px;--dy:95px;--dr:20deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+9){--dx:95px;--dy:55px;--dr:-45deg}.affirmation.active .affirmation-inner h2 .rc:nth-child(10n+10){--dx:-75px;--dy:-25px;--dr:45deg}
+@media (prefers-reduced-motion:reduce){.affirmation::before,.affirmation::after{display:none}.affirmation.active{animation:bbFadeRM 12s linear forwards}.affirmation.active .affirmation-inner,.affirmation.active .affirmation-inner p,.affirmation.active .affirmation-inner h2 .rc{animation:none}}
+@keyframes bbFadeRM{0%{opacity:0}8%,85%{opacity:1}100%{opacity:0}}
 </style>
 <style id="rewards-css">/* [S0] Rewards panel, welcome popup, NEW badge and ripple styling (the logic is in the REWARDS script below). */
 #rw-ov{position:fixed;inset:0;z-index:99990;display:none;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.78);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);touch-action:manipulation}
@@ -2086,7 +2166,7 @@ html:has(#theme-driver:checked)::after{opacity:.4}
 .rw-item .rw-ad button:disabled{opacity:.3}
 .rw-item .rw-ad button.rw-dl2{background:#5b1a2a;color:#ff9db0;flex:0 0 52px}
 .rw-item.rw-edit input{box-sizing:border-box;min-width:0;padding:11px;border-radius:10px;border:2px solid #8b2be2;background:#14061c;color:#fff;font:inherit;font-size:16px}
-.rw-item.rw-edit .rw-en{flex:1 1 100%}.rw-item.rw-edit .rw-ec{flex:1 1 100%}.rw-item.rw-edit .rw-ed{flex:1 1 100%}
+.rw-item.rw-edit .rw-en{flex:1 1 100%}.rw-item.rw-edit .rw-ec{flex:1 1 100%}.rw-item.rw-edit .rw-ed{flex:1 1 100%}.rw-item.rw-edit .rw-em{flex:1 1 100%}
 .rw-item .rw-ad button.rw-sv{background:#00a88f}
 #rw-claimed .rw-log{font-size:13.5px;opacity:.8;padding:4px 0}
 #rw-box :focus-visible,#rw-w :focus-visible{outline:3px solid #00d4b8;outline-offset:2px}
@@ -2147,12 +2227,15 @@ html:has(#theme-driver:checked)::after{opacity:.4}
 <h4>Owed to you</h4>
 <div id="rw-owed"></div>
 <h4>Pick a reward</h4>
+<div id="rw-dbl"></div>
+<div id="rw-tabs" style="display:flex;gap:6px;margin:0 0 10px;overflow-x:auto"></div>
 <div id="rw-list"></div>
 <div id="rw-claimed"></div>
 <div id="rw-admin" hidden>
 <div style="font-size:14px;font-weight:700">Daddy's tools</div>
 <div class="rw-row"><input id="rw-new-name" type="text" maxlength="60" placeholder="New reward" aria-label="New reward name"><input id="rw-new-cost" type="number" inputmode="numeric" min="1" step="1" placeholder="Cost" aria-label="Point cost"></div>
-<div class="rw-row"><input id="rw-new-desc" type="text" maxlength="140" placeholder="Description" aria-label="Description" style="flex:1"></div>
+<div class="rw-row"><input id="rw-new-desc" type="text" maxlength="400" placeholder="Description" aria-label="Description" style="flex:1"></div>
+<div class="rw-row"><select id="rw-new-cat" aria-label="Category" style="flex:1;padding:11px;border-radius:10px;border:2px solid #8b2be2;background:#150a1d;color:#fff;font:inherit;box-sizing:border-box;min-width:0"><option value="perks">Perks</option><option value="cash">Cash</option><option value="daddy">Daddy does</option><option value="power">Power-ups</option></select></div>
 <div class="rw-row"><button type="button" id="rw-add" style="flex:1">Add reward</button></div>
 <button type="button" id="rw-adjust">Add or subtract a custom amount</button>
 <button type="button" id="rw-mcx" style="width:100%;margin-top:10px;background:#3a2150">Export Motion Comics list</button>
@@ -2204,7 +2287,7 @@ window.__ptsPenalty=function(){return Math.floor(missedTotal()/MISS_PER_POINT)};
 
 function newOwed(){return{id:'o1',name:'Daddy\u2019s personal sleep video',due:Date.now()+30*DAY,delivered:null,bonus:0}}
 function load(){var d=null,ch=false;try{d=JSON.parse(g(DATA))}catch(e){}
-if(!d||!Array.isArray(d.items)){d={items:[{id:'r1',name:'You pick tonight\u2019s movie',cost:6},{id:'r5',name:'$20',cost:200},{id:'skip',name:'Skip a day',cost:3},{id:'r6',name:'$35',cost:300},{id:'r7',name:'$100',cost:600},{id:'r8',name:'Mommy?',cost:69,desc:'I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded.'},{id:'r9',name:'Reverse reward',cost:50,desc:'Brings back an already used reward.'}],claimed:[],owed:[newOwed()],v:3,sk:1,sk2:1,sk3:1,sk4:1,sk5:1,sk6:1,sk7:1,sk8:1};ch=true}
+if(!d||!Array.isArray(d.items)){d={items:[{id:'r1',name:'You pick tonight\u2019s movie',cost:6},{id:'r5',name:'$20',cost:200},{id:'skip',name:'Skip a day',cost:3},{id:'r6',name:'$35',cost:300},{id:'r7',name:'$100',cost:600},{id:'r8',name:'Mommy?',cost:69,desc:'I\u2019m a sub to you for the whole time you pick, straight through. I have to be a complete sub to Mommy, or your points are fully refunded.',more:'This one is mostly me being kind and loving to you: I take care of you, do what you ask, and make you feel adored. No butt stuff. At most ONE sexual thing during the whole time, and only if you want it.',opts:[{label:'2 hours',cost:69},{label:'3 hours',cost:169}]},{id:'r9',name:'Reverse reward',cost:50,desc:'Brings back an already used reward.'},{id:'r10',name:'Reset',cost:175,desc:'Brings back ALL of the rewards, so you can claim every one again.'},{id:'r11',name:'Double reward',cost:60,desc:'Get 2 more of any reward you pick. It works on itself too.',more:'Pick any reward and you get 2 more of it. That can be one you already used, and yes, you can use Double reward on Double reward. Tell me which one and I\u2019ll give you the 2 extra.'},{id:'r12',name:'Baby wendango',cost:10,desc:'I show you proof that I changed your name in my phone to \u201cbaby wendango\u201d.'}],claimed:[],owed:[newOwed()],v:3,sk:1,sk2:1,sk3:1,sk4:1,sk5:1,sk6:1,sk7:1,sk8:1,sk9:1,sk10:1,sk11:1,sk12:1,sk13:1};ch=true}
 if(d.v!==3){var old={r2:15,r3:25,r4:50};d.items=d.items.filter(function(i){return !(old[i.id]===i.cost)});d.items.forEach(function(i){if(i.id==='r1'&&i.cost===10)i.cost=50});if(!d.items.some(function(i){return i.id==='r5'}))d.items.push({id:'r5',name:'$20',cost:200});d.v=3;ch=true}
 if(!Array.isArray(d.owed)){d.owed=[newOwed()];ch=true}
 if(!d.sk){if(!d.items.some(function(i){return i.id==='skip'}))d.items.push({id:'skip',name:'Skip a day',cost:3});d.sk=1;ch=true}
@@ -2221,6 +2304,20 @@ if(!d.sk6){if(!d.items.some(function(i){return i.id==='r9'}))d.items.push({id:'r
 if(!d.sk7){d.items.forEach(function(i){if(i.id==='r8'&&i.name==='Sub for 3 hours'&&i.cost===150){i.name='Mommy?';i.cost=69;i.desc='I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded.'}if(i.id==='r9'&&i.name==='Dom for 3 hours'&&i.cost===150){i.name='Reverse reward';i.cost=50;i.desc='Brings back an already used reward.'}});d.sk7=1;ch=true}
 /* [S0L] MOVIE NIGHT PRICE (Oct 13, 2026, owner request, plan request 52): the Movie night reward (id r1, "You pick tonight's movie") costs 6 points now (it was 50). Changed once on saved lists via flag sk8, only if it is still 50, so a price Daddy set himself is left alone. */
 if(!d.sk8){d.items.forEach(function(i){if(i.id==='r1'&&i.cost===50)i.cost=6});d.sk8=1;ch=true}
+/* [S0L] RESET REWARD (Oct 13, 2026, owner request): "Reset" (id r10, flag sk9), 175 points, brings back ALL of the rewards. Claiming it marks every entry in claimed (including its own) with reset:1; entries with reset:1 stay in the Claimed log but no longer count as bought, so every reward can be claimed again. Added once to saved lists; if Daddy removes it in admin it does not come back. */
+if(!d.sk9){if(!d.items.some(function(i){return i.id==='r10'}))d.items.push({id:'r10',name:'Reset',cost:175,desc:'Brings back ALL of the rewards, so you can claim every one again.'});d.sk9=1;ch=true}
+/* [S0L] MOMMY? DETAILS BUTTON (Oct 13, 2026, owner request): any reward can have an optional longer note (item.more) that shows only when someone taps its Details button. Mommy? (r8) keeps its short description and gets the kind-and-loving note (no butt stuff, at most ONE sexual thing in the 3 hours) behind Details. Flag sk10 (the first version put it straight into the description) and sk11 (moves it behind the button) are both handled once: a description still equal to that first version is cut back to the short one. Anything Daddy edited is left alone. */
+if(!d.sk11){d.items.forEach(function(i){if(i.id==='r8'){if(i.desc==='I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded. This one is mostly me being kind and loving to you: I take care of you, do what you ask, and make you feel adored. No butt stuff. At most ONE sexual thing in the whole 3 hours, and only if you want it.')i.desc='I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded.';if(!i.more)i.more='This one is mostly me being kind and loving to you: I take care of you, do what you ask, and make you feel adored. No butt stuff. At most ONE sexual thing in the whole 3 hours, and only if you want it.'}});d.sk10=1;d.sk11=1;ch=true}
+/* [S0L] DOUBLE REWARD + BABY WENDANGO (Oct 13, 2026, owner request; plan requests 49 and 50). Double reward (id r11): 60 points, 2 more of any reward you pick, works on itself too (wording and the Details note are his, rephrased). Baby wendango (id r12): 10 points, Daddy shows proof he changed her name in his phone to "baby wendango". Both are honor system like Reverse reward: the picker for "which reward" is NOT built, Daddy gives the extras by hand. Flag sk12 adds them once to saved lists; if Daddy removes one in admin it does not come back. */
+if(!d.sk12){if(!d.items.some(function(i){return i.id==='r11'}))d.items.push({id:'r11',name:'Double reward',cost:60,desc:'Get 2 more of any reward you pick. It works on itself too.',more:'Pick any reward and you get 2 more of it. That can be one you already used, and yes, you can use Double reward on Double reward. Tell me which one and I\u2019ll give you the 2 extra.'});if(!d.items.some(function(i){return i.id==='r12'}))d.items.push({id:'r12',name:'Baby wendango',cost:10,desc:'I show you proof that I changed your name in my phone to \u201cbaby wendango\u201d.'});d.sk12=1;ch=true}
+/* [S0L] MOMMY? TIME PICKER (Oct 13, 2026, owner request): Mommy? (r8) is ONE reward with two time choices, 2 hours = 69 points and 3 hours = 169 points (item.opts = [{label,cost}]). Any reward can have opts: the row shows one small button per choice, tap one to pick it, and Claim uses that choice's cost. Claiming records the choice in the name, e.g. "Mommy? (3 hours)". item.cost stays the lowest price. Flag sk13 converts saved lists once; the old short description and Details note are reworded from "3 hours" to "the whole time you pick" only if Daddy has not edited them. */
+if(!d.sk13){d.items.forEach(function(i){if(i.id==='r8'){if(!i.opts)i.opts=[{label:'2 hours',cost:69},{label:'3 hours',cost:169}];if(i.cost===69||i.cost===150)i.cost=69;if(i.desc==='I\u2019m a sub to you for 3 hours straight. I have to be a complete sub to Mommy, or your points are fully refunded.')i.desc='I\u2019m a sub to you for the whole time you pick, straight through. I have to be a complete sub to Mommy, or your points are fully refunded.';if(i.more==='This one is mostly me being kind and loving to you: I take care of you, do what you ask, and make you feel adored. No butt stuff. At most ONE sexual thing in the whole 3 hours, and only if you want it.')i.more='This one is mostly me being kind and loving to you: I take care of you, do what you ask, and make you feel adored. No butt stuff. At most ONE sexual thing during the whole time, and only if you want it.'}});d.sk13=1;ch=true}
+/* [S0L] CATEGORIES + PERFECT DAY REWARD (Oct 13, 2026, owner request). (1) Every reward has a category item.cat: cash, daddy (Daddy does), perks, power (Power-ups); the Rewards screen shows one tab per category. Flag sk14 sorts existing rewards once (r5/r6/r7 cash; r8/r12/r13 daddy; r9/r10/r11 power; everything else perks); new rewards default to perks (the Add form has a category box, the Edit box too). (2) "Video game, your pick" (id r13, 12 points, cat daddy, lock:'perfect'): Daddy plays a video game of HER choice, with her or by himself, until he beats it. It stays LOCKED (a ??? tile that says it is a low-cost reward) until the Perfect Day achievement: every task box checked off (.chk-done) on one day, or any saved history day with all points (pts>=ptsMax, not skipped). The unlock is saved forever in d.unlocked.perfect (synced) and never re-locks. */
+if(!d.sk14){var CATM={r5:'cash',r6:'cash',r7:'cash',r8:'daddy',r12:'daddy',r13:'daddy',r9:'power',r10:'power',r11:'power'};d.items.forEach(function(i){if(!i.cat)i.cat=CATM[i.id]||'perks'});if(!d.items.some(function(i){return i.id==='r13'}))d.items.push({id:'r13',name:'Video game, your pick',cost:12,desc:'I play a video game of your choice, with you or by myself, until I beat it.',more:'You pick the game. I play it with you or on my own, and I keep going until the game is finished. This is a low-cost reward you unlocked with a Perfect Day: every box checked off in one day.',cat:'daddy',lock:'perfect'});d.sk14=1;ch=true}
+/* [S0L] DOUBLE REWARD FLOW (Oct 13, 2026, owner request): claiming Double reward (r11) opens a picker (#rw-dp): she taps one of the rewards she has already claimed (Double reward itself is allowed) and then Double it!. That adds 2 to d.extras[id]. A reward with extras shows gold "N free uses left" and its button becomes Use free (tap twice, costs 0 points, writes a claimed entry "Name (free)"); free uses go first, before any paid claim. If she closes the picker with Later, d.pendingDouble keeps counting and a gold banner at the top of Rewards reopens it. Flag sk15 rewrites the old Details text once. */
+if(!d.sk15){d.items.forEach(function(i){if(i.id==='r11'&&i.more==='Pick any reward and you get 2 more of it. That can be one you already used, and yes, you can use Double reward on Double reward. Tell me which one and I\u2019ll give you the 2 extra.')i.more='After you claim it, a screen pops up. Pick any reward you\u2019ve already claimed and you get 2 more of it, free. Find it in its tab and tap Use free whenever you want. Yes, you can pick Double reward itself.'});d.sk15=1;ch=true}
+/* [S0L] sk16 (Oct 13, 2026, owner): Double reward works on ANY reward, used or not, so the Details text no longer says "already claimed". Only rewritten if Daddy has not edited it. */
+if(!d.sk16){d.items.forEach(function(i){if(i.id==='r11'&&i.more==='After you claim it, a screen pops up. Pick any reward you\u2019ve already claimed and you get 2 more of it, free. Find it in its tab and tap Use free whenever you want. Yes, you can pick Double reward itself.')i.more='After you claim it, a screen pops up. Pick ANY reward, even one you\u2019ve already used, and you get 2 more of it, free. Find it in its tab and tap Use free whenever you want. Yes, you can pick Double reward itself.'});d.sk16=1;ch=true}
 if(!Array.isArray(d.claimed))d.claimed=[];
 if(ch)save(d);return d}
 /* Owed rewards: due 30 days after creation. Once overdue, +LATE_PTS points per full day until delivered; the bonus freezes at delivery. */
@@ -2246,7 +2343,36 @@ function renderOwed(){
 function save(d){s(DATA,JSON.stringify(d))}
 function totalNow(){var el=$('pts-total');var n=el?parseFloat(el.textContent):NaN;return isNaN(n)?0:n}
 
-var pending=null,pendT=null,lastSig='',tick=null,keep=null,editing=null,pmStep=1;
+var catSel='cash',optSel={},openMore={},pending=null,pendT=null,lastSig='',tick=null,keep=null,editing=null,pmStep=1;
+var CATS=[['cash','Cash'],['daddy','Daddy does'],['perks','Perks'],['power','Power-ups']];
+function catOf(it){return it.cat||'perks'}
+/* [S0L] DADDY APPROVES REWARDS (Oct 13, 2026, owner request): when SHE claims a reward (second tap), nothing is spent. A request is saved in the synced key daddys-list-requests = {rid:{id,name,cost,free,at,status,savedAt}}. Daddy sees it at the top of Rewards with Approve / Not yet. Approve is the moment the points are spent, the claimed entry is written and the effects run (Skip day, Reset, Double). Not yet marks it status 'no'; she sees "Daddy said not yet" until she taps OK. While requests are pending her usable points are reduced by their cost. NOAPPR = ids that skip approval (empty on purpose: everything needs approval). Daddy's own device claims directly. The Halo/Games button works the same way (daddys-list-games entry with pending:1). */
+var RQK='daddys-list-requests',NOAPPR=[];
+function rqGet(){try{var o=JSON.parse(g(RQK));return o&&typeof o==='object'&&!Array.isArray(o)?o:{}}catch(e){return {}}}
+function rqSet(o){s(RQK,JSON.stringify(o))}
+/* her device remembers which requests she sent (local only, key dl-rq-wait) so it can celebrate when Daddy approves */
+function wGet(){try{var a=JSON.parse(g('dl-rq-wait'));return Array.isArray(a)?a:[]}catch(e){return []}}
+function wAdd(k,i,n){var a=wGet();a.push({k:k,i:i,n:n});s('dl-rq-wait',JSON.stringify(a.slice(-30)))}
+function rqOpen(id){var R=rqGet();return Object.keys(R).some(function(k){return R[k].id===id&&R[k].status==='pending'})}
+function rqHeld(){var R=rqGet(),n=0;Object.keys(R).forEach(function(k){if(R[k].status==='pending'&&!R[k].free)n+=R[k].cost||0});return n}
+function rqApprove(rid){var R=rqGet(),q=R[rid];if(!q||q.status!=='pending')return;var d2=load(),exN=(d2.extras&&d2.extras[q.id])||0,t0=totalNow();
+ if(q.free&&exN<=0){delete R[rid];rqSet(R);return}
+ if(!q.free&&d2.claimed.some(function(c){return !c.reset&&(c.id?c.id===q.id:c.name===q.name)})){delete R[rid];rqSet(R);return}
+ if(!q.free&&t0<q.cost){alert('She does not have enough points for this one right now.');return}
+ if(!q.free)s(ADJ,String(getAdj()-q.cost));
+ if(q.free){d2.extras[q.id]=exN-1;if(!d2.extras[q.id])delete d2.extras[q.id]}
+ d2.claimed.push({id:q.id,name:q.name+(q.free?' (free)':''),cost:q.free?0:q.cost,at:Date.now()});
+ if(q.id==='r10')d2.claimed.forEach(function(c){c.reset=1});if(q.id==='r11')d2.pendingDouble=(d2.pendingDouble||0)+1;save(d2);
+ if(q.id==='skip'){s(SKIPK,JSON.stringify({day:dayKey(),at:Date.now()}));paintSkip()}
+ delete R[rid];rqSet(R);var el=$('pts-total');if(el)el.textContent=t0-(q.free?0:q.cost);lastSig='';renderAll(true)}
+function rqHtml(){var R=rqGet(),adm=isAdmin(),o='',ks=Object.keys(R).sort(function(a,b){return (R[a].at||0)-(R[b].at||0)});
+ ks.forEach(function(k){var q=R[k],bx='margin:0 0 10px;padding:12px;border:2px solid #ffd54a;border-radius:12px;background:#1d1430';
+  if(q.status==='pending')o+='<div style="'+bx+'"><div style="font-weight:800;color:#ffd54a;font-size:15px">\u23f3 '+(adm?'She wants: ':'Waiting for Daddy: ')+esc(q.name)+'</div><div class="rw-sk">'+(q.free?'a free use':q.cost+' points')+'</div>'+(adm?'<div class="rw-ad"><button type="button" data-rqa="'+esc(k)+'" style="background:#ffd54a;color:#1a1020;font-weight:800">&#10003; Approve</button><button type="button" data-rqn="'+esc(k)+'">Not yet</button></div>':'')+'</div>';
+  else if(q.status==='no'&&!adm)o+='<div style="'+bx+'"><div style="font-weight:800;font-size:15px">Daddy said not yet: '+esc(q.name)+'</div><div class="rw-sk">Nothing was spent.</div><div class="rw-ad"><button type="button" data-rqx="'+esc(k)+'">OK</button></div></div>'});
+ return o}
+function isLocked(d,it){return it.lock==='perfect'&&!(d.unlocked&&d.unlocked.perfect)}
+function effCost(it){if(it.opts&&it.opts.length){var o=it.opts[Math.min(optSel[it.id]||0,it.opts.length-1)];return o.cost}return it.cost}
+function effName(it){if(it.opts&&it.opts.length){var o=it.opts[Math.min(optSel[it.id]||0,it.opts.length-1)];return it.name+' ('+o.label+')'}return it.name}
 function renderTop(){
  var tot=totalNow(),pen=window.__ptsPenalty(),adj=getAdj(),mt=missedTotal(),toward=mt%MISS_PER_POINT,open=window.__ptsMissToday();
  var bon=window.__ptsBonus(),earned=Math.round((tot+pen-adj-bon)*100)/100;
@@ -2259,68 +2385,531 @@ function renderTop(){
   +(skipToday()?'<p><b>Today is a skip day.</b> Nothing today counts as missed, and your dots stay put.</p>':'')+(skipToday()?'':'<p>Missed tasks are counted when each day ends, starting '+esc(labelDate(g(START)||dayKey()))+'. Still open today: <b>'+open+'</b>. Finish them and they won\u2019t count.</p>');
 }
 function renderList(force){
- var d=load(),tot=totalNow(),sig=JSON.stringify([d.items,d.claimed.length,tot,pending,isAdmin(),skipToday(),editing]);
+ var d=load(),tot=totalNow()-(isAdmin()?0:rqHeld()),sig=JSON.stringify([g(RQK),d.items,d.claimed.length,tot,pending,isAdmin(),skipToday(),editing,openMore,optSel,catSel,d.unlocked,d.extras,d.pendingDouble]);
  if(!force&&sig===lastSig)return;lastSig=sig;
- var h='';
- d.items.forEach(function(it,ix){
-  if(isAdmin()&&editing===it.id){h+='<div class="rw-item rw-edit" data-eid="'+esc(it.id)+'"><input class="rw-en" type="text" maxlength="60" value="'+esc(it.name)+'" aria-label="Reward name"><input class="rw-ec" type="number" inputmode="numeric" min="1" step="1" value="'+it.cost+'" aria-label="Point cost"><input class="rw-ed" type="text" maxlength="140" placeholder="Description (optional)" value="'+esc(it.desc||'')+'" aria-label="Description"><div class="rw-ad"><button type="button" class="rw-sv" data-save="'+esc(it.id)+'">Save</button><button type="button" data-cancel="1">Cancel</button></div></div>';return}
-  var sk=it.id==='skip',act=sk&&skipToday(),bought=d.claimed.some(function(c){return c.id?c.id===it.id:c.name===it.name}),can=tot>=it.cost&&!act&&!bought,conf=pending===it.id;
-  h+='<div class="rw-item"><div class="rw-n">'+esc(it.name)+(sk?'<span class="rw-sk">A full day off. Nothing counts as missed, no penalty, and your dots stay put.</span>':(it.desc?'<span class="rw-sk">'+esc(it.desc)+'</span>':''))+'<span class="rw-c">'+it.cost+' points'+(can||act||bought?'':' \u00b7 '+(it.cost-tot)+' to go')+'</span></div>'
-   +'<button type="button" class="rw-claim'+(conf?' confirm':'')+'" data-id="'+esc(it.id)+'"'+(can?'':' disabled')+'>'+(act?'On today':(bought?'Claimed':(conf?'Tap to confirm':'Claim')))+'</button>'
-   +(isAdmin()?'<div class="rw-ad"><button type="button" data-mv="-1" data-id2="'+esc(it.id)+'"'+(ix===0?' disabled':'')+' aria-label="Move up">&#9650; Up</button><button type="button" data-mv="1" data-id2="'+esc(it.id)+'"'+(ix===d.items.length-1?' disabled':'')+' aria-label="Move down">&#9660; Down</button><button type="button" data-edit="'+esc(it.id)+'">&#9998; Edit</button><button type="button" class="rw-dl2" data-del="'+esc(it.id)+'" aria-label="Remove '+esc(it.name)+'">&times;</button></div>':'')+'</div>';
+ var h='',vis=d.items.filter(function(i){return catOf(i)===catSel});
+var pdn=d.pendingDouble||0;$('rw-dbl').innerHTML=pdn>0?'<div style="margin:0 0 10px;padding:12px;border:2px solid #ffd54a;border-radius:12px;background:#1d1430;text-align:center"><div style="font-weight:800;color:#ffd54a;font-size:15px">\u2728 You have a Double reward ready!</div><button type="button" data-dpick="1" style="margin-top:8px;width:100%;padding:11px;border-radius:10px;border:0;background:#ffd54a;color:#1a1020;font:800 15px system-ui,sans-serif">Pick what to double</button></div>':'';
+ $('rw-tabs').innerHTML=CATS.map(function(c){var on=c[0]===catSel;return '<button type="button" data-cat="'+c[0]+'" aria-pressed="'+(on?'true':'false')+'" style="flex:1 0 auto;padding:9px 12px;border-radius:999px;font:800 13px/1.2 inherit;font-family:inherit;white-space:nowrap;border:2px solid #8b2be2;color:#fff;background:'+(on?'#8b2be2':'transparent')+'">'+c[1]+'</button>'}).join('');
+ vis.forEach(function(it,ix){
+  if(isAdmin()&&editing===it.id){h+='<div class="rw-item rw-edit" data-eid="'+esc(it.id)+'"><input class="rw-en" type="text" maxlength="60" value="'+esc(it.name)+'" aria-label="Reward name">'+(it.opts&&it.opts.length?'<input class="rw-ec" type="hidden" value="'+it.cost+'"><div class="rw-sk" style="flex:1 1 100%">Prices: '+it.opts.map(function(o){return esc(o.label)+' '+o.cost}).join(', ')+'. Ask me to change these.</div>':'<input class="rw-ec" type="number" inputmode="numeric" min="1" step="1" value="'+it.cost+'" aria-label="Point cost">')+'<input class="rw-ed" type="text" maxlength="400" placeholder="Description (optional)" value="'+esc(it.desc||'')+'" aria-label="Description"><select class="rw-ecat" aria-label="Category" style="flex:1 1 100%;padding:11px;border-radius:10px;border:2px solid #8b2be2;background:#150a1d;color:#fff;font:inherit;box-sizing:border-box;min-width:0">'+CATS.map(function(c){return '<option value="'+c[0]+'"'+(catOf(it)===c[0]?' selected':'')+'>'+c[1]+'</option>'}).join('')+'</select><input class="rw-em" type="text" maxlength="600" placeholder="Details (optional, shows behind a Details button)" value="'+esc(it.more||'')+'" aria-label="Details"><div class="rw-ad"><button type="button" class="rw-sv" data-save="'+esc(it.id)+'">Save</button><button type="button" data-cancel="1">Cancel</button></div></div>';return}
+  if(isLocked(d,it)){var pdg=d.unlocked&&d.unlocked.perfectPending;h+='<div class="rw-item" style="border-style:dashed;border-color:#ffd54a"><div class="rw-n">'+(pdg?'\u23f3 Perfect Day, waiting for Daddy':'\ud83d\udd12 ???')+'<span class="rw-sk" style="opacity:.95">'+(pdg?(isAdmin()?'She checked off every box. Approve it and this reward unlocks for her.':'You checked off every box! Daddy has to approve your Perfect Day before this reward unlocks.'):'A Perfect Day reward. Check off every box in one day, then Daddy approves it. It\u2019s a low-cost reward, so go get it!')+'</span></div>'+(pdg&&isAdmin()?'<div class="rw-ad"><button type="button" data-approve="1" style="background:#ffd54a;color:#1a1020;font-weight:800">&#10003; Approve Perfect Day</button><button type="button" data-decline="1">Not yet</button></div>':'')+(isAdmin()?'<div class="rw-ad"><button type="button" data-mv="-1" data-id2="'+esc(it.id)+'"'+(ix===0?' disabled':'')+'>&#9650; Up</button><button type="button" data-mv="1" data-id2="'+esc(it.id)+'"'+(ix===vis.length-1?' disabled':'')+'>&#9660; Down</button><button type="button" data-edit="'+esc(it.id)+'">&#9998; Edit</button><button type="button" data-unlock="'+esc(it.id)+'">Unlock for her</button><button type="button" class="rw-dl2" data-del="'+esc(it.id)+'" aria-label="Remove">&times;</button></div>':'')+'</div>';return}
+  var ex=(d.extras&&d.extras[it.id])||0;
+  var sk=it.id==='skip',act=sk&&skipToday(),bought=d.claimed.some(function(c){return !c.reset&&(c.id?c.id===it.id:c.name===it.name)}),ec=effCost(it),can=ex>0?!act:(tot>=ec&&!act&&!bought),conf=pending===it.id,pq=!isAdmin()&&NOAPPR.indexOf(it.id)<0&&rqOpen(it.id);if(pq)can=false;
+  h+='<div class="rw-item"><div class="rw-n">'+esc(it.name)+(it.lock?'<span class="rw-sk" style="color:#ffd54a;opacity:1">\ud83c\udfc6 Unlocked by a Perfect Day \u00b7 low-cost reward</span>':'')+(sk?'<span class="rw-sk">A full day off. Nothing counts as missed, no penalty, and your dots stay put.</span>':(it.desc?'<span class="rw-sk">'+esc(it.desc)+'</span>':''))+(it.more?'<button type="button" class="rw-more" data-more="'+esc(it.id)+'" style="display:inline-block;margin-top:5px;padding:3px 10px;border-radius:999px;font:700 12px/1.3 inherit;font-family:inherit;border:1px solid currentColor;background:transparent;color:inherit;opacity:.85">Details</button>':'')+(it.opts&&it.opts.length?'<span class="rw-opts" style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'+it.opts.map(function(o,k){var on=(optSel[it.id]||0)===k;return '<button type="button" data-opt="'+esc(it.id)+'|'+k+'" aria-pressed="'+(on?'true':'false')+'" style="padding:6px 12px;border-radius:10px;font:700 13px/1.2 inherit;font-family:inherit;border:2px solid #8b2be2;color:#fff;background:'+(on?'#8b2be2':'transparent')+'">'+esc(o.label)+' \u00b7 '+o.cost+'</button>'}).join('')+'</span>':'')+'<span class="rw-c"'+(ex>0?' style="color:#ffd54a;opacity:1"':'')+'>'+(ex>0?'\u2728 '+ex+' free use'+(ex===1?'':'s')+' left':ec+' points'+(can||act||bought?'':' \u00b7 '+(ec-tot)+' to go'))+'</span></div>'
+   +'<button type="button" class="rw-claim'+(conf?' confirm':'')+'" data-id="'+esc(it.id)+'"'+(can?'':' disabled')+'>'+(act?'On today':(pq?'Waiting for Daddy':ex>0?(conf?'Tap to confirm':'Use free'):(bought?'Claimed':(conf?'Tap to confirm':'Claim'))))+'</button>'
+   +(isAdmin()?'<div class="rw-ad"><button type="button" data-mv="-1" data-id2="'+esc(it.id)+'"'+(ix===0?' disabled':'')+' aria-label="Move up">&#9650; Up</button><button type="button" data-mv="1" data-id2="'+esc(it.id)+'"'+(ix===vis.length-1?' disabled':'')+' aria-label="Move down">&#9660; Down</button><button type="button" data-edit="'+esc(it.id)+'">&#9998; Edit</button><button type="button" class="rw-dl2" data-del="'+esc(it.id)+'" aria-label="Remove '+esc(it.name)+'">&times;</button></div>':'')+'</div>';
  });
- if(!d.items.length)h='<div class="rw-empty">No rewards yet.'+(isAdmin()?' Add one below.':' Ask daddy to add some.')+'</div>';
- $('rw-list').innerHTML=(d.items.length?'<div class="rw-sk" style="margin:0 0 8px;text-align:center">Each reward can only be claimed once.</div>':'')+h;
+ if(!vis.length)h='<div class="rw-empty">Nothing in this tab yet.'+(isAdmin()?' Add one below.':' Ask daddy to add some.')+'</div>';
+ $('rw-list').innerHTML=rqHtml()+(vis.length?'<div class="rw-sk" style="margin:0 0 8px;text-align:center">Each reward can only be claimed once.</div>':'')+h;
  var c=d.claimed.slice(-5).reverse();
- $('rw-claimed').innerHTML=c.length?'<h4>Claimed</h4>'+c.map(function(x){return '<div class="rw-log">'+esc(x.name)+' \u00b7 \u2212'+x.cost+' \u00b7 '+esc(labelDate(dayKey(new Date(x.at))))+'</div>'}).join(''):'';
+ $('rw-claimed').innerHTML=c.length?'<h4>Claimed</h4>'+c.map(function(x){return '<div class="rw-log">'+esc(x.name)+' \u00b7 '+(x.cost?'\u2212'+x.cost:'free')+' \u00b7 '+esc(labelDate(dayKey(new Date(x.at))))+'</div>'}).join(''):'';
  $('rw-admin').hidden=!isAdmin();$('rw-pm').hidden=!isAdmin();
 }
 function renderAll(force){renderTop();renderOwed();renderList(force)}
 
+/* [S0L] DETAILS LAYER (Oct 13, 2026, owner request): the Details button opens this popup layer on top of Rewards (#rw-dt) instead of expanding the row. Tap Close, tap outside it, or press Escape to close. */
+var mst=document.createElement('style');mst.textContent='#rw-dt{position:fixed;inset:0;z-index:99995;display:none;align-items:center;justify-content:center;padding:18px;box-sizing:border-box;background:rgba(0,0,0,.72);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}#rw-dt.show{display:flex}#rw-dt .dtb{width:100%;max-width:380px;max-height:80vh;overflow-y:auto;box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #8b2be2;border-radius:18px;padding:20px 18px;font-family:system-ui,-apple-system,sans-serif}#rw-dt h3{margin:0 0 10px;font-size:20px}#rw-dt p{margin:0 0 16px;font-size:16px;line-height:1.45}#rw-dt button{width:100%;padding:12px;border-radius:12px;border:2px solid #8b2be2;background:transparent;color:#fff;font:700 16px system-ui,sans-serif}';document.head.appendChild(mst);
+var dtl=document.createElement('div');dtl.id='rw-dt';dtl.innerHTML='<div class="dtb" role="dialog" aria-modal="true"><h3 id="rw-dt-h"></h3><p id="rw-dt-p"></p><button type="button" id="rw-dt-x">Close</button></div>';document.body.appendChild(dtl);
+function showMore(it){$('rw-dt-h').textContent=it.name;$('rw-dt-p').textContent=it.more;dtl.classList.add('show')}
+function hideMore(){dtl.classList.remove('show')}
+dtl.addEventListener('click',function(e){if(e.target===dtl||e.target.id==='rw-dt-x')hideMore()});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&dtl.classList.contains('show')){hideMore();e.stopImmediatePropagation()}},true);
+/* [S0L] PERFECT DAY (Oct 13, 2026): checks for the achievement (every task box done today, or a saved perfect day in history) and saves d.unlocked.perfect. The party popup (#rw-pd) shows ONCE per device (flag dl-perfect-seen-v1, not synced, replay with ?perfectnotice) and never on Daddy's device. */
+var PSEEN='dl-perfect-seen-v1';
+(function(){var st=document.createElement('style');st.textContent='#rw-pd{position:fixed;inset:0;z-index:99999;display:none;align-items:center;justify-content:center;padding:18px;box-sizing:border-box;background:rgba(0,0,0,.8);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px);overflow:hidden}#rw-pd.show{display:flex}#rw-pd .pdb{position:relative;z-index:2;width:100%;max-width:360px;text-align:center;box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #ffd54a;border-radius:20px;padding:24px 18px;font-family:system-ui,-apple-system,sans-serif;animation:pdPop .5s cubic-bezier(.2,1.4,.4,1)}#rw-pd h2{margin:6px 0 8px;font-size:26px;color:#ffd54a}#rw-pd p{margin:0 0 16px;font-size:16px;line-height:1.45}#rw-pd button{width:100%;padding:12px;border-radius:12px;border:2px solid #ffd54a;background:#ffd54a;color:#1a1020;font:800 16px system-ui,sans-serif;margin-top:8px}#rw-pd button.pdl{background:transparent;color:#fff;border-color:#8b2be2}#rw-pd .pdt{font-size:56px;line-height:1}#rw-pd .pdc{position:absolute;top:-10%;font-size:24px;z-index:1;animation:pdFall 3.2s linear infinite;pointer-events:none}@keyframes pdFall{to{transform:translateY(115vh) rotate(360deg)}}@keyframes pdPop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}@media (prefers-reduced-motion:reduce){#rw-pd .pdc{animation:none;display:none}#rw-pd .pdb{animation:none}}';document.head.appendChild(st)})();
+var pdEl=document.createElement('div');pdEl.id='rw-pd';
+(function(){var cf='',em=['🎉','⭐','🏆','✨','💜','🎊'];for(var i=0;i<18;i++)cf+='<span class="pdc" style="left:'+(3+i*5.5)+'%;animation-delay:'+((i%6)*.45)+'s;animation-duration:'+(2.6+(i%5)*.35)+'s">'+em[i%em.length]+'</span>';
+pdEl.innerHTML=cf+'<div class="pdb" role="dialog" aria-modal="true"><div class="pdt" id="rw-pd-i">\ud83c\udfc6</div><h2 id="rw-pd-h">PERFECT DAY!</h2><p id="rw-pd-p">Every single box checked off! Daddy has to approve your Perfect Day before your new reward unlocks.</p><button type="button" id="rw-pd-go">See my new reward</button><button type="button" class="pdl" id="rw-pd-x">Later</button></div>';document.body.appendChild(pdEl)})();
+function hidePd(){pdEl.classList.remove('show')}
+function showParty(i,h,p){$('rw-pd-i').textContent=i;$('rw-pd-h').textContent=h;$('rw-pd-p').textContent=p;$('rw-pd-go').style.display='none';pdEl.classList.add('show')}
+function showPd(){s(PSEEN,'1');$('rw-pd-i').textContent='\ud83c\udfc6';$('rw-pd-h').textContent='PERFECT DAY!';$('rw-pd-p').textContent='Every single box checked off! Daddy has to approve your Perfect Day before your new reward unlocks.';$('rw-pd-go').style.display='';pdEl.classList.add('show')}
+pdEl.addEventListener('click',function(e){if(e.target.id==='rw-pd-x'||e.target===pdEl)hidePd();if(e.target.id==='rw-pd-go'){hidePd();catSel='daddy';openRw()}});
+function perfectNow(){var c=cells();if(!c.length)return false;for(var i=0;i<c.length;i++){var dn=c[i].querySelector('.chk-done');if(!(dn&&dn.checked))return false}return true}
+function perfectHist(){var H={};try{H=JSON.parse(g(HISTK))||{}}catch(e){}return Object.keys(H).some(function(k){var e=H[k]||{};return !e.skipped&&e.ptsMax>0&&e.pts>=e.ptsMax})}
+var PAPPR='dl-perfect-appr-v1';
+/* [S0L] PERFECT DAY NEEDS DADDY'S APPROVAL (Oct 13, 2026, owner request): finishing every box no longer unlocks the reward by itself. It saves d.unlocked.perfectPending={day,at}; the tile shows "waiting for Daddy" and Daddy gets Approve Perfect Day / Not yet. Approve saves d.unlocked.perfect={day,at,by:'daddy',approved:true} (the same key as before, so everything that checks it still works). Not yet clears the pending ask and saves d.unlocked.perfectDeclined={day}; she is not asked again that day, and an old history day alone never re-asks. Unlock for her still unlocks at once. Perfect days that were already unlocked before this change stay unlocked. */
+function checkPerfect(withHist){var d=load();var u=d.unlocked||{};
+ if(!u.perfect&&!u.perfectPending){
+  if(u.perfectDeclined&&(u.perfectDeclined.day===dayKey()||!perfectNow()))return;
+  if(!(perfectNow()||(withHist&&perfectHist())))return;
+  d.unlocked=d.unlocked||{};d.unlocked.perfectPending={day:dayKey(),at:Date.now()};save(d);lastSig='';if($('rw-ov').classList.contains('show'))renderList(true)}
+ if(isAdmin())return;
+ var u2=load().unlocked||{};
+ if(u2.perfect){if(u2.perfect.approved&&!g(PAPPR)){s(PAPPR,'1');showParty('\ud83c\udf89','APPROVED!','Daddy approved your Perfect Day. Your new reward is unlocked.');$('rw-pd-go').style.display=''}return}
+ if(u2.perfectPending&&!g(PSEEN))showPd()}
+document.addEventListener('change',function(e){if(e.target&&e.target.classList&&e.target.classList.contains('chk-done'))setTimeout(function(){checkPerfect(false)},600)});
+setTimeout(function(){checkPerfect(true)},7000);
+try{if(/[?&]perfectnotice\b/.test(location.search)){localStorage.removeItem(PSEEN);setTimeout(showPd,1200)}}catch(e){}
+/* [S0L] DOUBLE PICKER (#rw-dp), see DOUBLE REWARD FLOW. */
+var dpSel=null;
+(function(){var st=document.createElement('style');st.textContent='#rw-dp{position:fixed;inset:0;z-index:99996;display:none;align-items:center;justify-content:center;padding:18px;box-sizing:border-box;background:rgba(0,0,0,.78);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px)}#rw-dp.show{display:flex}#rw-dp .dpb{width:100%;max-width:380px;max-height:86vh;overflow-y:auto;box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #ffd54a;border-radius:20px;padding:20px 16px;font-family:system-ui,-apple-system,sans-serif;text-align:center}#rw-dp h2{margin:0 0 6px;font-size:24px;color:#ffd54a}#rw-dp p{margin:0 0 12px;font-size:16px;line-height:1.4}#rw-dp .dpi{display:block;width:100%;margin:0 0 8px;padding:14px;border-radius:12px;border:2px solid #8b2be2;background:transparent;color:#fff;font:700 16px system-ui,sans-serif}#rw-dp .dpi.on{background:#8b2be2}#rw-dp .dpg{display:block;width:100%;padding:14px;border-radius:12px;border:0;background:#ffd54a;color:#1a1020;font:800 17px system-ui,sans-serif;margin-top:6px}#rw-dp .dpg:disabled{opacity:.4}#rw-dp .dpx{display:block;width:100%;padding:11px;border-radius:12px;border:2px solid #8b2be2;background:transparent;color:#fff;font:700 15px system-ui,sans-serif;margin-top:8px}#rw-dp .dpt{font-size:52px;line-height:1}';document.head.appendChild(st)})();
+var dpEl=document.createElement('div');dpEl.id='rw-dp';document.body.appendChild(dpEl);
+function dpList(d){return d.items.filter(function(i){return !isLocked(d,i)})}
+function dpRender(){var d=load();if((d.pendingDouble||0)<1){dpEl.classList.remove('show');return}
+ var L=dpList(d);dpEl.innerHTML='<div class="dpb" role="dialog" aria-modal="true"><h2>✨ Double reward</h2><p>Pick a reward. You get <b>2 more</b> of it, free.</p>'+L.map(function(it){return '<button type="button" class="dpi'+(dpSel===it.id?' on':'')+'" data-dpi="'+esc(it.id)+'">'+esc(it.name)+'</button>'}).join('')+'<button type="button" class="dpg" id="dp-go"'+(dpSel?'':' disabled')+'>Double it!</button><button type="button" class="dpx" id="dp-x">Later</button></div>';dpEl.classList.add('show')}
+function openDp(){dpSel=null;dpRender()}
+dpEl.addEventListener('click',function(e){
+ var b=e.target.closest('[data-dpi]');if(b){dpSel=b.getAttribute('data-dpi');dpRender();return}
+ if(e.target.id==='dp-x'||e.target===dpEl){dpEl.classList.remove('show');renderList(true);return}
+ if(e.target.id==='dp-ok'){var nx=load();dpEl.classList.remove('show');renderAll(true);if((nx.pendingDouble||0)>0)openDp();return}
+ if(e.target.id==='dp-go'&&dpSel){var d=load(),it=d.items.filter(function(i){return i.id===dpSel})[0];if(!it||(d.pendingDouble||0)<1)return;
+  d.extras=d.extras||{};d.extras[it.id]=(d.extras[it.id]||0)+2;d.pendingDouble=Math.max(0,(d.pendingDouble||0)-1);save(d);catSel=catOf(it);dpSel=null;
+  if(navigator.vibrate)navigator.vibrate([12,45,12]);
+  dpEl.innerHTML='<div class="dpb" role="dialog" aria-modal="true"><div class="dpt">✨</div><h2>Doubled!</h2><p>You now have <b>2 free</b> “'+esc(it.name)+'”. Open its tab and tap <b>Use free</b> any time.</p><button type="button" class="dpg" id="dp-ok">Got it</button></div>'}
+});
+
+/* [S0L] GAMES (Oct 13, 2026, owner request): a third button "GAMES" next to MOTION COMICS and MOTION PICTURES opens the Games layer (#gm-ov). Each game in GAMES gives points ONCE when she taps "We beat it!" and confirms (same idea as the movie confirm). First game: Halo 5 co-op on Legendary with daddy = 100 points. State is in daddys-list-games = {id:{at}} (synced; the points go through daddys-list-points-adj). Daddy can Undo (takes the points back). To add a game, add a line to GAMES. */
+var GAMES=[{id:'halo5',name:'Halo 5: Guardians',sub:'Co-op · Legendary · with daddy',pts:100,desc:'Beat the whole campaign together in co-op on Legendary.'}];
+var GK='daddys-list-games';
+function gget(){try{return JSON.parse(g(GK))||{}}catch(e){return {}}}
+function gset(o){s(GK,JSON.stringify(o))}
+function bumpPts(n){s(ADJ,String(getAdj()+n));var el=$('pts-total');if(el)el.textContent=Math.round((totalNow()+n)*100)/100}
+(function(){var st=document.createElement('style');st.textContent='#gm-ov{position:fixed;inset:0;z-index:99997;display:none;flex-direction:column;background:#0c0510;color:#fff;font-family:system-ui,-apple-system,sans-serif}#gm-ov.show{display:flex}#gm-ov .gm-cats{display:flex;flex:0 0 auto}#gm-ov .gm-cats button{flex:1 1 0;min-width:0;min-height:48px;padding:0 6px;font:800 12px/1.2 system-ui,sans-serif;letter-spacing:.1em;text-transform:uppercase;border:0;border-right:2px solid #3a2150;border-bottom:2px solid #3a2150;background:#150a1d;color:#cbb8e6}#gm-ov .gm-cats button:last-child{border-right:0}#gm-ov .gm-cats button.on{background:#8b2be2;color:#fff}#gm-ov .gm-info{display:flex;align-items:center;gap:10px;padding:12px 14px}#gm-ov .gm-pts{background:#ffd54a;color:#1a1020;font-weight:900;border-radius:8px;padding:3px 8px}#gm-ov .gm-info b{flex:1;font-size:15px}#gm-ov .gm-x{width:40px;height:40px;border:0;background:none;color:#fff;font-size:24px;opacity:.8}#gm-ov .gm-list{flex:1;overflow-y:auto;padding:0 14px 24px}#gm-ov .gm-item{border:2px solid #8b2be2;border-radius:16px;padding:14px;background:#150a1d;margin-bottom:12px}#gm-ov .gm-item.beat{border-color:#00a88f}#gm-ov .gm-top{display:flex;gap:10px;align-items:flex-start}#gm-ov .gm-n{flex:1;font-size:20px;font-weight:800}#gm-ov .gm-n small{display:block;font-size:13px;font-weight:600;opacity:.75;margin-top:3px}#gm-ov .gm-p{background:#ffd54a;color:#1a1020;font-weight:900;border-radius:10px;padding:5px 10px;font-size:15px;white-space:nowrap}#gm-ov p{margin:10px 0 12px;font-size:15px;line-height:1.4;opacity:.9}#gm-ov .gm-beat{width:100%;padding:14px;border:0;border-radius:12px;background:#00a88f;color:#fff;font:800 17px system-ui,sans-serif}#gm-ov .gm-done{font-weight:800;color:#00d4b4;font-size:16px}#gm-ov .gm-undo{margin-top:10px;padding:8px 12px;border-radius:10px;border:2px solid #8b2be2;background:transparent;color:#fff;font:700 13px system-ui,sans-serif}#gm-cf{position:fixed;inset:0;z-index:99998;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(0,0,0,.8)}#gm-cf.show{display:flex}#gm-cf .cb{width:100%;max-width:340px;text-align:center;background:#0c0510;color:#fff;border:2px solid #8b2be2;border-radius:18px;padding:20px 16px;font-family:system-ui,sans-serif}#gm-cf h3{margin:0 0 8px;font-size:22px}#gm-cf p{margin:0 0 14px;font-size:16px;line-height:1.4}#gm-cf button{display:block;width:100%;padding:13px;border-radius:12px;border:2px solid #8b2be2;background:transparent;color:#fff;font:800 16px system-ui,sans-serif;margin-top:8px}#gm-cf button.y{background:#00a88f;border-color:#00a88f}';document.head.appendChild(st)})();
+var gmEl=document.createElement('div');gmEl.id='gm-ov';document.body.appendChild(gmEl);
+var gcEl=document.createElement('div');gcEl.id='gm-cf';document.body.appendChild(gcEl);var gmPend=null;
+function gmRender(){var G=gget(),adm=isAdmin();
+ gmEl.innerHTML='<div class="gm-cats"><button type="button" data-gcat="0">Motion Comics</button><button type="button" data-gcat="1">Motion Pictures</button><button type="button" class="on">Games</button></div><div class="gm-info"><span class="gm-pts">+100</span><b>Beat a game with daddy</b><button type="button" class="gm-x" id="gm-x" aria-label="Close">&#10005;</button></div><div class="gm-list">'
+ +GAMES.map(function(gm){var dn=G[gm.id];return '<div class="gm-item'+(dn?' beat':'')+'"><div class="gm-top"><div class="gm-n">'+esc(gm.name)+'<small>'+esc(gm.sub)+'</small></div><span class="gm-p">+'+gm.pts+'</span></div><p>'+esc(gm.desc)+'</p>'+(dn&&dn.pending?'<div class="gm-done" style="color:#ffd54a">\u23f3 '+(adm?'She says you beat it together. Approve to give her +'+gm.pts+' points.':'Waiting for Daddy to approve. The points come after he does.')+'</div>'+(adm?'<button type="button" class="gm-beat" data-gap="'+esc(gm.id)+'" style="margin-top:10px">&#10003; Approve +'+gm.pts+'</button><button type="button" class="gm-undo" data-gno="'+esc(gm.id)+'">Not yet</button>':''):dn?'<div class="gm-done">✓ Beaten '+esc(labelDate(dayKey(new Date(dn.at))))+' · +'+gm.pts+' points</div>'+(adm?'<button type="button" class="gm-undo" data-gundo="'+esc(gm.id)+'">Undo (daddy)</button>':''):'<button type="button" class="gm-beat" data-gbeat="'+esc(gm.id)+'">We beat it!</button>')+'</div>'}).join('')+'</div>'}
+function openGames(){gmRender();gmEl.classList.add('show')}
+function closeGames(){gmEl.classList.remove('show');gcEl.classList.remove('show')}
+document.addEventListener('click',function(e){var t=e.target;if(!t||!t.closest)return;var gb=t.closest('.mc-cats [data-cat="2"]');if(gb){e.stopPropagation();e.preventDefault();openGames()}},true);
+gmEl.addEventListener('click',function(e){var t=e.target;
+ if(t.id==='gm-x'){closeGames();var x=document.querySelector('.mc-info .mc-x');if(x)x.click();return}
+ var gc=t.closest('[data-gcat]');if(gc){var n=gc.getAttribute('data-gcat');closeGames();var ub=document.querySelector('.mc-cats [data-cat="'+n+'"]');if(ub)ub.click();return}
+ var bt=t.closest('[data-gbeat]');if(bt){var gm=GAMES.filter(function(x){return x.id===bt.getAttribute('data-gbeat')})[0];if(!gm)return;gmPend=gm;gcEl.innerHTML='<div class="cb"><h3>'+esc(gm.name)+'</h3><p>Did you beat it with daddy, lovey?</p><button type="button" class="y" id="gc-y">Yes, we beat it!</button><button type="button" id="gc-n">Not yet</button></div>';gcEl.classList.add('show');return}
+ var ga=t.closest('[data-gap]');if(ga&&isAdmin()){var ag=GAMES.filter(function(x){return x.id===ga.getAttribute('data-gap')})[0],GA=gget();if(!ag||!GA[ag.id]||!GA[ag.id].pending)return;GA[ag.id]={at:Date.now(),savedAt:new Date().toISOString()};gset(GA);bumpPts(ag.pts);gmRender();return}
+ var gn=t.closest('[data-gno]');if(gn&&isAdmin()){var GN=gget(),gk=gn.getAttribute('data-gno');if(GN[gk]&&GN[gk].pending){delete GN[gk];gset(GN)}gmRender();return}
+ var ud=t.closest('[data-gundo]');if(ud&&isAdmin()){var u=GAMES.filter(function(x){return x.id===ud.getAttribute('data-gundo')})[0],G=gget();if(!u||!G[u.id])return;if(!confirm('Undo this game and take back '+u.pts+' points?'))return;delete G[u.id];gset(G);bumpPts(-u.pts);gmRender()}
+});
+gcEl.addEventListener('click',function(e){var t=e.target;
+ if(t.id==='gc-n'||t===gcEl){gcEl.classList.remove('show');gmPend=null;return}
+ if(t.id==='gc-y'&&gmPend){var gm=gmPend,G=gget();gmPend=null;gcEl.classList.remove('show');if(G[gm.id]){gmRender();return}
+  if(isAdmin()){G[gm.id]={at:Date.now()};gset(G);bumpPts(gm.pts);if(navigator.vibrate)navigator.vibrate([12,45,12]);gmRender();showParty('🎮','GAME BEATEN!','You beat '+gm.name+' with daddy. That’s +'+gm.pts+' points!')}
+  else{G[gm.id]={at:Date.now(),pending:1,savedAt:new Date().toISOString()};gset(G);s('dl-gm-wait-'+gm.id,'1');if(navigator.vibrate)navigator.vibrate([12,45,12]);gmRender();showParty('⏳','SENT TO DADDY','Daddy has to approve that you beat '+gm.name+'. You get the +'+gm.pts+' points after he does.')}}
+});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&gmEl.classList.contains('show')){closeGames();e.stopImmediatePropagation()}},true);
+/* [S0L] +POINTS ANIMATION (Oct 13, 2026; v6: 3D GLOSSY BALLOON). Every time the TOTAL POINTS number goes UP by N, a glossy latex-style balloon with "+N / point(s)" printed on it inflates in near the lower middle of the screen, floats UP (random lean left or right, about 36 to 50% of the screen height), sways on its string with a little 3D wobble (rotateY under perspective), shrinks to about 40%, then POPS: it swells, a white flash and soft shockwave rings go off, and curled glossy scraps and droplets of the balloon's color burst out and fall. The balloon is one inline SVG built in fly(): body = radial gradient (light core, rim darkening, light bounce lower right), blurred specular highlight + a sharp glint + a thin window reflection, a shaded knot, a thin string, and a CSS drop-shadow. Colors: the site's greens through pal() / PAL (original / barbie / minecraft x dark / light; f main, e printed text, d dark tone); mix() makes the lighter and deeper tones. Bigger gain = bigger balloon. Watches #pts-total (MutationObserver); silent for 3 s after load and while the tab is hidden; reduced-motion = plain fade, no pop, no wobble. window.__dlPlus(n) plays it on demand (Halo approval on her phone). */
+(function(){var el=document.getElementById('pts-total');if(!el)return;
+var st=document.createElement('style');st.textContent='.dl-plus{position:fixed;z-index:100001;pointer-events:none;width:0;height:0}.dl-plus .bl{position:absolute;left:0;top:0;width:0;height:0;animation:dlRise 2.4s cubic-bezier(.3,.55,.4,1) forwards}.dl-plus .sw{position:absolute;left:0;top:0;width:0;height:0;transform-origin:0 calc(var(--bw)*1.25)}.dl-plus .sv{position:absolute;left:calc(var(--bw)/-2);top:calc(var(--bw)*-.61);width:var(--bw);height:calc(var(--bw)*1.9);overflow:visible}.dl-plus .sv text{font-family:system-ui,-apple-system,sans-serif}.dl-plus.mc .sv text{font-family:"Pixelify Sans","Space Mono",monospace}.dl-plus .mk{position:absolute;left:0;top:calc(var(--bw)*-.03);width:0;height:0}.dl-plus .cs{position:absolute;left:calc(var(--bw)*-.45);top:calc(var(--bw)*-.58);width:calc(var(--bw)*.9);height:calc(var(--bw)*1.12);border-radius:50% 50% 46% 46%/44% 44% 56% 56%;background:rgba(0,0,0,var(--so));filter:blur(calc(var(--bw)*.07))}.dl-plus .cs.st{left:calc(var(--bw)/-2);top:calc(var(--bw)*-.61);width:var(--bw);height:calc(var(--bw)*1.9);border-radius:0;background:none}.dl-plus .cs.st svg{display:block;width:100%;height:100%;opacity:var(--so)}.dl-plus .tx{position:absolute;left:0;top:calc(var(--bw)*-.02);transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;color:var(--pe);font-family:system-ui,-apple-system,sans-serif;text-shadow:0 1px 0 rgba(255,255,255,.3),0 -1px 0 rgba(0,0,0,.16)}.dl-plus .tx b{font-weight:900;font-size:var(--fs);line-height:1;white-space:nowrap;letter-spacing:-.01em}.dl-plus .tx small{font-weight:800;font-size:calc(var(--fs)*.34);line-height:1;letter-spacing:.16em;text-transform:uppercase;margin-top:.55em;opacity:.9}.dl-plus.mc .tx,.dl-plus.mc .tx b,.dl-plus.mc .tx small{font-family:"Pixelify Sans","Space Mono",monospace}.dl-plus .bst{position:absolute;left:var(--dx);top:var(--dy);width:0;height:0}.dl-plus .fl{position:absolute;left:0;top:0;width:150px;height:150px;margin:-75px 0 0 -75px;border-radius:50%;background:radial-gradient(circle,var(--pg) 0,var(--pf) 30%,transparent 68%);mix-blend-mode:screen;opacity:0;animation:dlFlash .35s ease-out 2.02s both}.dl-plus .ring{position:absolute;left:0;top:0;width:70px;height:70px;margin:-35px 0 0 -35px;border-radius:50%;border:2px solid var(--pg);box-shadow:0 0 10px var(--pg);opacity:0;animation:dlPopRing .7s ease-out 2.02s both}.dl-plus .ring.r2{border:3px solid var(--pf);box-shadow:none;animation-delay:2.09s;animation-duration:.8s}.dl-plus .sh{position:absolute;left:0;top:0;width:var(--sw);height:calc(var(--sw)*.72);margin:calc(var(--sw)*-.36) 0 0 calc(var(--sw)/-2);background:linear-gradient(135deg,var(--sa) 0,var(--sb) 48%,var(--sc) 100%);opacity:0;animation:dlShard 1.35s cubic-bezier(.2,.6,.4,1) 2.02s both}.dl-plus .dp{position:absolute;left:0;top:0;width:var(--sw);height:var(--sw);margin:calc(var(--sw)/-2) 0 0 calc(var(--sw)/-2);border-radius:50%;background:radial-gradient(circle at 35% 30%,var(--sa),var(--sb) 60%,var(--sc));opacity:0;animation:dlDrop 1s cubic-bezier(.2,.7,.4,1) 2.02s both}@keyframes dlRise{0%{transform:translate(0,0) scale(.2);opacity:0}9%{transform:translate(0,0) scale(1.15);opacity:1}16%{transform:translate(calc(var(--dx)*.03),calc(var(--dy)*.03)) scale(1);opacity:1}80%{transform:translate(var(--dx),var(--dy)) scale(.42);opacity:1}84%{transform:translate(var(--dx),var(--dy)) scale(.6);opacity:1}84.2%{transform:translate(var(--dx),var(--dy)) scale(.6);opacity:0}100%{transform:translate(var(--dx),var(--dy)) scale(.6);opacity:0}}@keyframes dlSway{0%{transform:perspective(1200px) rotateZ(0) rotateY(0)}20%{transform:perspective(1200px) rotateZ(-7deg) rotateY(20deg)}45%{transform:perspective(1200px) rotateZ(6deg) rotateY(-18deg)}68%{transform:perspective(1200px) rotateZ(-5deg) rotateY(14deg)}84%{transform:perspective(1200px) rotateZ(4deg) rotateY(-8deg)}100%{transform:perspective(1200px) rotateZ(4deg) rotateY(-8deg)}}@keyframes dlFlash{0%{transform:scale(.2);opacity:0}10%{opacity:.8}100%{transform:scale(1.4);opacity:0}}@keyframes dlPopRing{0%{transform:scale(.3);opacity:0}8%{opacity:.7}100%{transform:scale(2.3);opacity:0}}@keyframes dlShard{0%{transform:translate(0,0) rotateX(0) rotateY(0) rotateZ(0) scale(1);opacity:0;filter:brightness(1.4)}5%{opacity:1}22%{filter:brightness(.72)}34%{filter:brightness(1.45)}45%{filter:brightness(.8);transform:translate(var(--bx),var(--by)) perspective(300px) rotateX(var(--rx)) rotateY(var(--ry)) rotateZ(var(--br)) scale(.95);opacity:1}100%{transform:translate(calc(var(--bx)*1.2),calc(var(--by) + 130px)) perspective(300px) rotateX(calc(var(--rx)*2)) rotateY(calc(var(--ry)*2)) rotateZ(calc(var(--br)*1.6)) scale(.55);opacity:0;filter:brightness(1.1)}}@keyframes dlDrop{0%{transform:translate(0,0) scale(.4);opacity:0}8%{opacity:1}100%{transform:translate(var(--bx),calc(var(--by) + 90px)) scale(.8);opacity:0}}.dl-plus .pm{position:absolute;left:0;top:0;width:max-content;max-width:min(78vw,320px);text-align:center;white-space:normal;font:900 21px/1.15 system-ui,-apple-system,sans-serif;letter-spacing:.02em;transform:translate(calc(-50% + var(--ox,0px)),-135%);animation:dlPmFade 2s linear 2.05s both,dlPmUp 2s ease-out 2.05s both;pointer-events:none}.dl-plus.mc .pm{font-family:"Pixelify Sans","Space Mono",monospace}.dl-plus .pw{display:inline-block;white-space:nowrap}.dl-plus .l{display:inline-block;position:relative;z-index:3;color:#fff;-webkit-text-stroke:.2em var(--pd);paint-order:stroke fill;text-shadow:0 .09em 0 rgba(0,0,0,.35),0 0 .55em var(--pf);opacity:0;animation:dlLet .8s cubic-bezier(.2,.9,.3,1) calc(2.55s + var(--dl,0s)) both}.dl-plus .pb{position:absolute;left:-1em;right:-1em;top:-.75em;bottom:-.75em;border-radius:50%;z-index:1;border:2px solid rgba(255,255,255,.75);background:radial-gradient(circle at 28% 22%,rgba(255,255,255,.95) 0,rgba(255,255,255,.35) 11%,transparent 24%),radial-gradient(circle at 50% 55%,transparent 52%,var(--pf) 140%),rgba(255,255,255,.14);box-shadow:inset 0 0 14px rgba(255,255,255,.55),0 0 16px var(--pf);opacity:0;animation:dlBub .78s ease-out 2.05s both}.dl-plus.mc .pb{border-radius:8px}.dl-plus .pk{position:absolute;left:-2.2em;right:-2.2em;top:-1.9em;bottom:-1.9em;z-index:2;background:radial-gradient(circle,#fff 0,var(--pg) 30%,var(--pf) 72%);opacity:0;animation:dlSpk .55s ease-out 2.53s both}.dl-plus .pr{position:absolute;left:50%;top:50%;width:4em;height:4em;margin:-2em 0 0 -2em;border-radius:50%;border:3px solid var(--pg);z-index:2;box-shadow:0 0 10px var(--pg);opacity:0;animation:dlPr .65s ease-out 2.53s both}.dl-plus .pdr{position:absolute;left:50%;top:50%;width:var(--ds);height:var(--ds);margin:calc(var(--ds)/-2) 0 0 calc(var(--ds)/-2);border-radius:50%;z-index:2;background:radial-gradient(circle at 35% 30%,#fff,var(--pf) 70%);opacity:0;animation:dlDrp .75s cubic-bezier(.15,.7,.3,1) 2.53s both}@keyframes dlMoo{0%,100%{translate:0 0;scale:1 1}30%{translate:0 -.16em;scale:.93 1.2}65%{translate:0 .05em;scale:1.06 .9}}.dl-plus .pm.moo{max-width:min(92vw,380px);letter-spacing:0}.dl-plus .pm.moo .l{font-size:var(--mf,1.5em);animation:dlLet .8s cubic-bezier(.2,.9,.3,1) calc(2.55s + var(--dl,0s)) both,dlMoo .85s ease-in-out calc(2.55s + var(--mi,0s)) infinite}@keyframes dlPmFade{0%,88%{opacity:1}100%{opacity:0}}@keyframes dlPmUp{0%{translate:0 0}100%{translate:0 -26px}}@keyframes dlBub{0%{opacity:0;transform:scale(.1)}30%{opacity:1;transform:scale(1.06)}45%{transform:scale(.97)}58%{opacity:1;transform:scale(1.04)}66%{opacity:1;transform:scale(1.14)}100%{opacity:0;transform:scale(1.75)}}@keyframes dlSpk{0%{opacity:0;transform:scale(.25) rotate(-8deg)}22%{opacity:.95;transform:scale(1.05) rotate(0)}100%{opacity:0;transform:scale(1.55) rotate(6deg)}}@keyframes dlPr{0%{opacity:.95;transform:scale(.3)}100%{opacity:0;transform:scale(2.6)}}@keyframes dlDrp{0%{opacity:1;transform:translate(0,0) scale(1)}100%{opacity:0;transform:translate(var(--bx),var(--by)) scale(.3)}}@keyframes dlLet{0%{opacity:0;transform:translate(var(--sx,0),var(--sy,0)) scale(.15) rotate(var(--r0,0deg))}10%{opacity:1}55%{transform:translate(calc(var(--sx,0px)*-.16),calc(var(--sy,0px)*-.16)) scale(1.4) rotate(var(--r1,0deg))}80%{transform:translate(0,0) scale(.94) rotate(0)}100%{opacity:1;transform:translate(0,0) scale(1) rotate(0)}}@media (prefers-reduced-motion:reduce){.dl-plus .bl{animation:dlPlusR 1.6s linear forwards;transform:translate(var(--dx),calc(var(--dy)*.2))}.dl-plus .sw{animation:none}.sw.g3{transform-style:preserve-3d}.sw.g3>.sv{transform-style:flat}.sw.g3>.sv:not(.gz){transform:translateZ(calc(var(--bw)*.03))}.dl-plus .bst{display:none}@keyframes dlPlusR{0%{opacity:0}15%{opacity:1}80%{opacity:1}100%{opacity:0}}}';document.head.appendChild(st);
+var PAL={original:{dark:{f:'#00e8c8',e:'#04201b',d:'#00a99b'},light:{f:'#00a99b',e:'#ffffff',d:'#007f74'}},
+ barbie:{dark:{f:'#6ee7a8',e:'#3d1030',d:'#38b574'},light:{f:'#2fbf7f',e:'#ffffff',d:'#1f9060'}},
+ minecraft:{dark:{f:'#5cb338',e:'#15300a',d:'#3e8e22'},light:{f:'#3e8e22',e:'#ffffff',d:'#2b6618'}}};
+function hx(c){return [parseInt(c.slice(1,3),16),parseInt(c.slice(3,5),16),parseInt(c.slice(5,7),16)]}
+function mix(a,b,k){var A=hx(a),B=hx(b);return 'rgb('+A.map(function(v,i){return Math.round(v+(B[i]-v)*k)}).join(',')+')'}
+function pal(){var th=document.documentElement.getAttribute('data-dl-theme')||'original',lt=false;try{lt=!!document.getElementById('theme-driver').checked}catch(e){}return {th:th,lt:lt,c:(PAL[th]||PAL.original)[lt?'light':'dark']}}
+var prev=null,t0=Date.now();
+function val(){var n=parseFloat(el.textContent);return isNaN(n)?null:n}
+var CE=.883,SE=.469,PI=Math.PI,GD=[116,62,72],GF=[222,148,148],GH=[252,220,210],FGD=[120,62,2],FGF=[247,186,34],FGH=[255,243,184];
+function sway(tf){var K=[[0,0,0],[.2,-7,20],[.45,6,-18],[.68,-5,14],[.84,4,-8],[1,4,-8]];for(var i=1;i<K.length;i++)if(tf<=K[i][0]){var a=K[i-1],b=K[i],k=(tf-a[0])/(b[0]-a[0]);k=k*k*(3-2*k);return [a[1]+(b[1]-a[1])*k,a[2]+(b[2]-a[2])*k]}return [4,-8]}
+function balloonSvg(c,lt,u,fU,txt,sub){var HI=mix(c.f,'#ffffff',.55),F=c.f,MID=mix(c.f,c.d,.62),DEEP=mix(c.d,'#000000',.42),RIM=mix(c.f,'#ffffff',.3),BODY='M50 4C22 4 4 26 4 54C4 84 30 104 45 114Q50 119 55 114C70 104 96 84 96 54C96 26 78 4 50 4Z',SC=lt?'#5d5d6c':'#eceef4',
+ I=function(k){return k+u},S=function(o,col,a){return '<stop offset="'+o+'" stop-color="'+col+'" stop-opacity="'+a+'"/>'},
+ RG=function(k,r,s){return '<radialGradient id="'+I(k)+'" gradientUnits="userSpaceOnUse" cx="50" cy="58" r="'+r+'">'+s+'</radialGradient>'},
+ f2=fU*.34,ls=f2*.16,y1=57+fU*.135,y2=57+fU*.585;
+ function T(dy,fill,op){return '<g fill="'+fill+'" fill-opacity="'+op+'" transform="translate(0 '+dy+')"><text x="50" y="'+y1.toFixed(1)+'" font-size="'+fU.toFixed(1)+'" font-weight="900" text-anchor="middle" letter-spacing="-.01em">'+txt+'</text><text x="'+(50+ls/2).toFixed(1)+'" y="'+y2.toFixed(1)+'" font-size="'+f2.toFixed(1)+'" font-weight="800" text-anchor="middle" letter-spacing="'+ls.toFixed(2)+'" opacity=".9">'+sub+'</text></g>'}
+ return '<svg class="sv" viewBox="0 0 100 190" aria-hidden="true"><defs><clipPath id="'+I('cp')+'"><path d="'+BODY+'"/></clipPath>'
+ +RG('gd',80,S(0,DEEP,0)+S(.2,DEEP,0)+S(.58,DEEP,lt?.5:.58)+S(1,DEEP,lt?.9:.97))
+ +RG('gl',64,S(0,HI,.82)+S(.4,HI,.36)+S(1,HI,0))
+ +RG('gr',56,S(0,RIM,lt?.5:.62)+S(.5,RIM,.2)+S(1,RIM,0))
+ +RG('ga',62,S(.5,DEEP,0)+S(1,DEEP,lt?.4:.58))
+ +'<radialGradient id="'+I('gs')+'"><stop offset="0" stop-color="#fff" stop-opacity=".78"/><stop offset=".55" stop-color="#fff" stop-opacity=".28"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>'
+ +'<radialGradient id="'+I('nk')+'" gradientUnits="userSpaceOnUse" cx="50" cy="112" r="17">'+S(0,DEEP,.6)+S(1,DEEP,0)+'</radialGradient>'
+ +'<linearGradient id="'+I('kn')+'" gradientUnits="userSpaceOnUse" x1="42" y1="116" x2="58" y2="128">'+S(0,HI,1)+S(.5,MID,1)+S(1,DEEP,1)+'</linearGradient>'
+ +'<filter id="'+I('bl')+'" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation=".8"/></filter></defs>'
+ +'<path d="M50 126C40 140 60 152 50 164S42 180 50 188" fill="none" stroke="'+SC+'" stroke-opacity=".8" stroke-width="1.1" stroke-linecap="round"/>'
+ +'<g clip-path="url(#'+I('cp')+')"><rect x="0" y="0" width="100" height="125" fill="'+F+'"/>'
+ +'<g id="'+I('tg')+'">'+dlStack(T,c)+'</g>'
+ +'<rect x="0" y="0" width="100" height="125" fill="url(#'+I('gd')+')"/><rect x="0" y="0" width="100" height="125" fill="url(#'+I('gl')+')"/><rect x="0" y="0" width="100" height="125" fill="url(#'+I('gr')+')"/><rect x="0" y="0" width="100" height="125" fill="url(#'+I('ga')+')"/>'
+ +'<ellipse cx="50" cy="112" rx="17" ry="11" fill="url(#'+I('nk')+')"/>'
+ +'<path d="M49 113C46 107 41 102 36 99M50 112C50 106 50 101 50 96M51 113C54 107 59 102 64 99" fill="none" stroke="'+DEEP+'" stroke-opacity=".32" stroke-width="1.4" stroke-linecap="round"/><path d="M50.800 113C51 107 51 101 51 96.500" fill="none" stroke="#fff" stroke-opacity=".16" stroke-width=".8" stroke-linecap="round"/>'
+ +'<ellipse id="'+I('b2')+'" rx="9" ry="14" fill="url(#'+I('gs')+')" opacity=".34"/>'
+ +'<ellipse id="'+I('sp')+'" rx="9" ry="19" fill="url(#'+I('gs')+')"/>'
+ +'<rect id="'+I('sb')+'" x="-3.200" y="-11" width="6.400" height="22" rx="3" fill="#fff" fill-opacity=".92" filter="url(#'+I('bl')+')"/>'
+ +'<ellipse id="'+I('gt')+'" rx="1.500" ry="3.200" fill="#fff"/></g>'
+ +'<path d="M50 116C47 118.500 43.500 122.500 42.500 128C47 126.500 53 126.500 57.500 128C56.500 122.500 53 118.500 50 116Z" fill="url(#'+I('kn')+')"/></svg>'}
+var STAR={f:'#f4bd2f',e:'#4a2a00',d:'#b57d0c'},ROSE={f:'#e3a3a1',e:'#4a2028',d:'#a85a66'},SV=(function(){var V=[],k,a,r;for(k=0;k<10;k++){a=(-90+k*36)*PI/180;r=k%2?20:48;V.push([50+Math.cos(a)*r,58+Math.sin(a)*r])}return V})(),
+ SW=SV.map(function(v){return [50+(v[0]-50)*.68,58+(v[1]-58)*.68]}),
+ SN=(function(){var N=[],k,A,B,C,D,e1,e2,n,m,h;/* local face normals: 10 steep bevel faces + 10 slightly domed plateau faces */
+  function cr(a,b){return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]}
+  function nz(v){var m=Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);if(v[2]<0)v=[-v[0],-v[1],-v[2]];return [v[0]/m,v[1]/m,v[2]/m]}
+  for(k=0;k<10;k++){A=SV[k];B=SV[(k+1)%10];C=SW[k];D=SW[(k+1)%10];e1=[B[0]-A[0],B[1]-A[1],0];e2=[(C[0]+D[0])/2-(A[0]+B[0])/2,(C[1]+D[1])/2-(A[1]+B[1])/2,9];N.push(nz(cr(e1,e2)))}
+  for(k=0;k<10;k++){C=SW[k];D=SW[(k+1)%10];e1=[C[0]-50,C[1]-58,-2.5];e2=[D[0]-50,D[1]-58,-2.5];N.push(nz(cr(e1,e2)))}
+  return N})();
+function starPath(){var d='',n=10,k,P,Q,N,t,A,B;for(k=0;k<n;k++){P=SV[k];Q=SV[(k+n-1)%n];N=SV[(k+1)%n];t=k%2?.07:.1;A=[P[0]+(Q[0]-P[0])*t,P[1]+(Q[1]-P[1])*t];B=[P[0]+(N[0]-P[0])*t,P[1]+(N[1]-P[1])*t];d+=(k?'L':'M')+A[0].toFixed(1)+' '+A[1].toFixed(1)+'Q'+P[0].toFixed(1)+' '+P[1].toFixed(1)+' '+B[0].toFixed(1)+' '+B[1].toFixed(1)}return d+'Z'}
+function lerp3(a,b,k){return [a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k,a[2]+(b[2]-a[2])*k]}
+function rgb3(a){return 'rgb('+Math.round(a[0])+','+Math.round(a[1])+','+Math.round(a[2])+')'}
+/* SOLID GOLD STAR: a cast-gold, bevelled five-point star (not a balloon: no string). Ten steep bevel faces around a slightly domed flat top (the +N is stamped on the top). Every face is lit per frame from the same key light with its real 3D normal; the star tumbles in 3D (rotateZ + rotateY) so the faces flash and the polished-metal glints travel across them; a sparkle flares on the tip facing the light; the cast shadow is star-shaped. */
+function starSvg(c,lt,u,fU,txt,sub){var F=c.f,DEEP=mix(c.d,'#2a1500',.5),ST=starPath(),I=function(k){return k+u},k,fac='',cr='',P=function(a){return a[0].toFixed(1)+' '+a[1].toFixed(1)},
+ f2=fU*.34,ls=f2*.16,y1=59+fU*.135,y2=59+fU*.585;
+ var M=starMesh();M.F.forEach(function(f){fac+='<path d="'+f.map(function(q,n){return (n?'L':'M')+(50+M.V[q][0]).toFixed(1)+' '+(58+M.V[q][1]).toFixed(1)}).join('')+'Z" fill="'+F+'" stroke="'+DEEP+'" stroke-opacity=".35" stroke-width=".45" stroke-linejoin="round"/>'});
+ function T(dy,fill,op){return '<g fill="'+fill+'" fill-opacity="'+op+'" transform="translate(0 '+dy+')"><text x="50" y="'+y1.toFixed(1)+'" font-size="'+fU.toFixed(1)+'" font-weight="900" text-anchor="middle" letter-spacing="-.01em">'+txt+'</text><text x="'+(50+ls/2).toFixed(1)+'" y="'+y2.toFixed(1)+'" font-size="'+f2.toFixed(1)+'" font-weight="800" text-anchor="middle" letter-spacing="'+ls.toFixed(2)+'" opacity=".9">'+sub+'</text></g>'}
+ return '<svg class="sv" viewBox="0 0 100 190" aria-hidden="true"><defs><clipPath id="'+I('cp')+'"><path d="'+ST+'"/></clipPath>'
+ +'<radialGradient id="'+I('gs')+'"><stop offset="0" stop-color="#fff" stop-opacity=".9"/><stop offset=".5" stop-color="#fff" stop-opacity=".32"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>'
+ +'<linearGradient id="'+I('shg')+'" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".5"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+ +'<filter id="'+I('bl')+'" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation=".7"/></filter></defs>'
+ +'<g>'
+ +'<g id="'+I('fg')+'">'+fac+'</g>'
+ +'<g id="'+I('tg')+'">'+'<g class="tl" filter="url(#'+I('bl')+')">'+T(0,'#2a0f14',.55)+'</g>'+['#6e2f3c','#7d3a47','#8d4653','#a05561','#b6666f','#cf8089'].map(function(cc){return '<g class="tl">'+T(0,cc,1)+'</g>'}).join('')+'<g class="tl">'+T(0,'#fff3ec',1)+'</g></g>'
+ +'<rect opacity="0" id="'+I('sh')+'" x="-70" y="-5" width="140" height="10" fill="url(#'+I('shg')+')"/>'
+ +'<ellipse opacity="0" id="'+I('sp')+'" rx="9" ry="16" fill="url(#'+I('gs')+')"/>'
+ +'<rect opacity="0" id="'+I('sb')+'" x="-2.600" y="-9" width="5.200" height="18" rx="2.400" fill="#fff" fill-opacity=".9" filter="url(#'+I('bl')+')"/>'
+ +'<ellipse opacity="0" id="'+I('gt')+'" rx="1.400" ry="3.200" fill="#fff"/></g>'
+ +'<g id="'+I('fx')+'" opacity="0"><ellipse rx=".9" ry="10" fill="#fff"/><ellipse rx="10" ry=".9" fill="#fff"/><circle r="4" fill="url(#'+I('gs')+')"/></g></svg>'}
+var _SM=null;function starMesh(){if(_SM)return _SM;var V=[],F=[],k,k1;
+function ring(z,sc){var o=V.length,j;for(j=0;j<10;j++)V.push([(SV[j][0]-50)*sc,(SV[j][1]-58)*sc,z]);return o}
+var Of=ring(3,1),Ob=ring(-3,1),Pf=ring(8,.68),Pb=ring(-8,.68),Cf=V.length;V.push([0,0,10.5]);var Cb=V.length;V.push([0,0,-10.5]);
+for(k=0;k<10;k++){k1=(k+1)%10;
+ F.push([Of+k,Of+k1,Pf+k1,Pf+k]);F.push([Cf,Pf+k,Pf+k1]);
+ F.push([Ob+k1,Ob+k,Pb+k,Pb+k1]);F.push([Cb,Pb+k1,Pb+k]);
+ F.push([Of+k,Ob+k,Ob+k1,Of+k1])}
+return _SM={V:V,F:F}}
+var DLMSG={
+ all:["So proud of you","Look at you go","You are glowing","Gorgeous and productive","That's how it's done","Keep shining","Nailed it, beautiful","You make this look easy","Okay, show-off","Hot and on task","Look who's winning","Be proud of that one","You're unstoppable","Can't stop, won't stop","Gold star behavior","Yes. Just like that.","Come here, you","Somebody's on fire","Cutie with a plan","You earned that"],
+ barbie:["Pink power, babe","Totally fabulous","Dreamy and done","Iconic behavior","Fashionably productive","Glam and getting it done","Obsessed with you","Main character energy","Sparkle on, gorgeous","Pretty in pink, pretty good"],
+ minecraft:["Achievement unlocked","+1 legend","Level up, miner","Critical hit","Fully enchanted","Crafting greatness","Diamond-tier effort","You mined that","Respawn? Never.","Loot secured, hottie"],
+ original:["Smooth work, gorgeous","A new you","Fresh, fast, flawless","To better health","Clean win, cutie"],
+ star:["Gold star, baby","Rose gold royalty","Star of the show","Shine on, superstar","You're a whole star"],
+ gem:["You sparkle","Flawless, like you","Brilliant work","Cut above the rest","Rare and radiant"],
+ balloon:["You popped off","Up, up and adored","Float on, gorgeous"],
+ foil:["Shiny and proud","Stellar, honestly","Shooting star energy"],
+ cowx:["Holy cow, you did it","Udderly proud of you","Moo-ve over, superstar","Moo-velous work","Steady and strong, like you","Herd that? You're crushing it","Cow-ngratulations, cutie","Nothing but a good moo-d"],
+ poop:["To better health","Healthy gut, happy you","Taking care of business","Go with the flow, gorgeous","Flushed with success","Regular as a gold star","Your body says thank you","Nailed it, cutie"]};
+function dlPick(th,kd){if(kd==='cow'&&Math.random()<.25){window.__dlLastMsg='Mooooooo';return 'Mooooooo'}var a=kd==='poop'?DLMSG[kd]:kd==='cow'?DLMSG.all.concat(DLMSG.cowx,DLMSG.cowx):DLMSG.all.concat(DLMSG[th]||[],DLMSG[th]||[],DLMSG[kd]||[]),m,t=0;do{m=a[Math.floor(Math.random()*a.length)];t++}while(m===window.__dlLastMsg&&t<8);window.__dlLastMsg=m;return m}
+function dlStack(T,c){var o=T(3.4,'#000000',.24),k,DK=mix(c.d,'#000000',.5);for(k=6;k>=1;k--)o+=T(k*.45,k>3?DK:mix(c.d,'#000000',.2+k*.05),1);return o+'<g stroke="'+DK+'" stroke-width=".55" stroke-linejoin="round" paint-order="stroke">'+T(0,'#ffffff',1)+'</g>'}
+function dlLayers(tg,cp,sp2,ct,st,Lx,Ly,zs,z0,dz,k){var ch=tg.children,i,zt,e,f;for(i=0;i<ch.length;i++){zt=i?z0+(i-1)*dz:zs;e=50*(1-cp)+zt*sp2;f=58*(1-ct)-50*st*sp2-st*zt*cp;if(!i){e-=Lx*k;f-=Ly*k}ch[i].setAttribute('transform','matrix('+[cp,st*sp2,0,ct,e,f].map(function(v){return v.toFixed(3)}).join(' ')+')')}}
+function dlMsgHtml(msg,ox){var moo=/^Mo{3,}$/.test(msg),li=0,h='<div class="pm'+(moo?' moo':'')+'" style="--ox:'+ox+'px"><i class="pb"></i>',pts=[],i,a,r,rd=function(n){return Math.round(Math.random()*n*2-n)};
+for(i=0;i<28;i++){a=i*Math.PI/14;r=i%2?33:50;pts.push((50+Math.cos(a)*r).toFixed(1)+'% '+(50+Math.sin(a)*r).toFixed(1)+'%')}
+h+='<i class="pk" style="clip-path:polygon('+pts.join(',')+')"></i><i class="pr"></i>';
+for(i=0;i<9;i++){a=i/9*Math.PI*2+Math.random()*.5;r=44+Math.random()*40;h+='<i class="pdr" style="--bx:'+Math.round(Math.cos(a)*r*1.6)+'px;--by:'+Math.round(Math.sin(a)*r)+'px;--ds:'+(5+Math.round(Math.random()*6))+'px"></i>'}
+msg.split(' ').forEach(function(w,wi){if(wi)h+=' ';h+='<span class="pw">';w.split('').forEach(function(ch){var mf=moo?(li?[1.9,2.3,2.7,2.9,2.7,2.3,1.9][Math.min(li-1,6)]:2.2):0;h+='<span class="l" style="--r0:'+rd(40)+'deg;--r1:'+rd(14)+'deg;--dl:'+(Math.random()*.14).toFixed(2)+'s'+(moo?';--mf:'+mf+'em;--mi:'+(2.55+li*.07).toFixed(2)+'s':'')+'">'+ch+'</span>';li++});h+='</span>'});
+return h+'</div>'}
+function dlMsgAim(d){var pm=d.querySelector('.pm');if(!pm)return;var cx=pm.offsetWidth/2,cy=pm.offsetHeight/2;[].forEach.call(pm.querySelectorAll('.l'),function(el){el.style.setProperty('--sx',Math.round(cx-(el.offsetLeft+el.offsetWidth/2))+'px');el.style.setProperty('--sy',Math.round(cy-(el.offsetTop+el.offsetHeight/2))+'px')})}
+function starShadow(){return '<svg viewBox="0 0 100 190" aria-hidden="true"><path d="'+starPath()+'" fill="#000"/></svg>'}
+var GU0=[28,20],GU1=[50,20],GU2=[72,20],GG=[[5,46],[20,46],[35,46],[50,46],[65,46],[80,46],[95,46]],GBR=[[7,51],[21,51],[35,51],[50,51],[65,51],[79,51],[93,51]],GK=[50,108],GTB=[[35,11],[65,11]],
+ GFC=[[GTB[0],GTB[1],GU2,GU0],
+  [GG[0],GU0,GG[1]],[GU0,GG[2],GG[1]],[GU0,GU1,GG[2]],[GU1,GG[3],GG[2]],[GU1,GG[4],GG[3]],[GU1,GU2,GG[4]],[GU2,GG[5],GG[4]],[GU2,GG[6],GG[5]],
+  [GG[0],GG[2],GBR[2],GBR[0]],[GG[2],GG[4],GBR[4],GBR[2]],[GG[4],GG[6],GBR[6],GBR[4]],
+  [GBR[0],GBR[1],GK],[GBR[1],GBR[2],GK],[GBR[2],GBR[3],GK],[GBR[3],GBR[4],GK],[GBR[4],GBR[5],GK],[GBR[5],GBR[6],GK]],
+ GV=[GG[0],GG[6],GU0,GU2,GTB[0],GTB[1],GK],
+ GN=GFC.map(function(f,i){var cx=0,cy=0,nx,ny,nz,nn;f.forEach(function(q){cx+=q[0];cy+=q[1]});cx/=f.length;cy/=f.length;
+  if(i===0)return [0,0,1];
+  if(i<9){nx=(cx-50)/50*1.05;ny=(cy-33)/13*.8;nz=1}else if(i<12){nx=(cx-50)/50*1.3;ny=.12;nz=1}else{nx=(cx-50)/45*1.1;ny=.95;nz=.85}
+  nn=Math.sqrt(nx*nx+ny*ny+nz*nz);return [nx/nn,ny/nn,nz/nn]}),
+ GRF=[0,1,2,3,4,5].map(function(j){var A=GBR[j],B=GBR[j+1],m=function(q){return [q[0],46-(q[1]-51)*.45]};return [m(A),m(B),m(GK)]}).concat([[[40,66],[60,66],[55,86],[45,86]],[[30,54],[44,60],[38,78]]]);
+function gemPath(){return 'M5 46L28 20L35 11L65 11L72 20L95 46L93 51L50 108L7 51Z'}
+function hsl3(h){h=((h%360)+360)%360;var a=h/60,f=a-Math.floor(a),q=1-f,i=Math.floor(a)%6,v=[[1,f,0],[q,1,0],[0,1,f],[0,q,1],[f,0,1],[1,0,q]][i];return v.map(function(x){return 120+135*x})}
+/* DIAMOND: a clear, transparent brilliant-cut diamond (ice-white in dark mode, cool glass-grey in light mode). 18 facets (table, 8 crown, 3 girdle, 6 pavilion) are lit per frame from the same key light with their real 3D normals, and their OPACITY follows the light so the background shows through the shaded ones. Mirrored pavilion reflections and two inner kites show through the crown and pavilion for depth. The gem tumbles in 3D (rotateZ + rotateY + rotateX), facets flash white and throw rainbow 'fire', and a sparkle flares on the corner facing the light. */
+function gemSvg(c,lt,u,fU,txt,sub){var DEEP=lt?'#15395f':'#06203c',I=function(k){return k+u},fac='',rf='',P=function(a){return a[0].toFixed(1)+' '+a[1].toFixed(1)},
+ f2=fU*.34,ls=f2*.16,y1=63+fU*.135,y2=63+fU*.585,ink=lt?'#0d2f55':'#ffffff',inkE=lt?'#ffffff':'#06203c';
+ var M=gemMesh();M.F.forEach(function(f){fac+='<path d="'+f.map(function(q,n){return (n?'L':'M')+(50+M.V[q][0]).toFixed(1)+' '+M.V[q][1].toFixed(1)}).join('')+'Z" fill="#fff" fill-opacity=".3" stroke="'+(lt?'#2a5a8a':'#fff')+'" stroke-opacity=".8" stroke-width=".6" stroke-linejoin="round"/>'});
+ function T(dy,fill,op,st){return '<g fill="'+fill+'" fill-opacity="'+op+'" '+(st||'')+' transform="translate(0 '+dy+')"><text x="50" y="'+y1.toFixed(1)+'" font-size="'+fU.toFixed(1)+'" font-weight="900" text-anchor="middle" letter-spacing="-.01em">'+txt+'</text><text x="'+(50+ls/2).toFixed(1)+'" y="'+y2.toFixed(1)+'" font-size="'+f2.toFixed(1)+'" font-weight="800" text-anchor="middle" letter-spacing="'+ls.toFixed(2)+'" opacity=".95">'+sub+'</text></g>'}
+ return '<svg class="sv" viewBox="0 0 100 190" aria-hidden="true"><defs><clipPath id="'+I('cp')+'"><path d="'+gemPath()+'"/></clipPath>'
+ +'<radialGradient id="'+I('gs')+'"><stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset=".5" stop-color="#fff" stop-opacity=".34"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>'
+ +'<linearGradient id="'+I('shg')+'" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+ +'<filter id="'+I('bl')+'" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation=".7"/></filter>'
+ +'<linearGradient id="'+I('dg')+'" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".28"/><stop offset=".42" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="'+DEEP+'" stop-opacity=".6"/></linearGradient>'
+ +'<linearGradient id="'+I('dx')+'" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity=".22"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="'+DEEP+'" stop-opacity=".35"/></linearGradient>'
+ +'<filter id="'+I('eb')+'" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="2.6"/></filter></defs>'
+ +'<g>'
+ +'<g id="'+I('rf')+'">'+rf+'</g><g id="'+I('fg')+'">'+fac+'</g>'
+ +'<g id="'+I('tg')+'">'+'<g class="tl" filter="url(#'+I('bl')+')">'+T(0,'#000',.35)+'</g>'+(lt?['#0a1f3a','#12335a','#1c4a7c','#2a629a','#3d7bb4','#5b97c9']:['#06203c','#0d3a66','#17558f','#2a77b8','#4d9ad6','#86c4f0']).map(function(cc){return '<g class="tl">'+T(0,cc,1)+'</g>'}).join('')+'<g class="tl">'+T(0,ink,1,'stroke="'+inkE+'" stroke-opacity=".55" stroke-width=".4" paint-order="stroke"')+'</g></g>'
+ +'<rect opacity="0" id="'+I('sh')+'" x="-70" y="-5" width="140" height="10" fill="url(#'+I('shg')+')"/>'
+ +'<ellipse opacity="0" id="'+I('sp')+'" rx="8" ry="15" fill="url(#'+I('gs')+')"/>'
+ +'<rect opacity="0" id="'+I('sb')+'" x="-2.400" y="-8" width="4.800" height="16" rx="2.200" fill="#fff" fill-opacity=".95" filter="url(#'+I('bl')+')"/>'
+ +'<ellipse id="'+I('gt')+'" rx="1.300" ry="3" fill="#fff"/></g>'
+ +'<g id="'+I('fx')+'" opacity="0"><ellipse rx=".9" ry="13" fill="#fff"/><ellipse rx="13" ry=".9" fill="#fff"/><circle r="5" fill="url(#'+I('gs')+')"/></g></svg>'}
+var _GM=null;function gemMesh(){if(_GM)return _GM;var V=[],F=[],T=[],j,R=45,rt=22,yT=14,yG=46,yG2=50,yC=108,rp=.5*R,hP=(yC-yG2)*(1-rp*Math.cos(Math.PI/8)/R);
+function ring(r,y,off){var o=V.length,k,an;for(k=0;k<8;k++){an=(k+off)*Math.PI/4;V.push([r*Math.cos(an),y,r*Math.sin(an)])}return o}
+var G1=ring(R,yG,0),G2=ring(R,yG2,0),Tt=ring(rt,yT,.5),Pm=ring(rp,yG2+hP,.5),C=V.length;V.push([0,yC,0]);
+function add(f,t){F.push(f);T.push(t?1:0)}
+add([0,1,2,3,4,5,6,7].map(function(k){return Tt+k}),1);
+for(j=0;j<8;j++){var j1=(j+1)%8,jm=(j+7)%8;
+ add([Tt+jm,Tt+j,G1+j]);add([G1+j,G1+j1,Tt+j]);
+ add([G1+j,G1+j1,G2+j1,G2+j]);
+ add([G2+j,G2+j1,Pm+j]);add([G2+j,Pm+jm,C,Pm+j])}
+return _GM={V:V,F:F,T:T}}
+function gemLayers(lt){var N=10,k,t,r,g,b,o='',A=lt?[120,160,200]:[96,150,200],B=lt?[28,58,96]:[8,30,62];for(k=1;k<=N;k++){t=k/N;r=Math.round(A[0]+(B[0]-A[0])*t);g=Math.round(A[1]+(B[1]-A[1])*t);b=Math.round(A[2]+(B[2]-A[2])*t);o+='<svg class="sv gz" viewBox="0 0 100 190" aria-hidden="true" style="transform-origin:50% 33%;transform:translateZ(calc(var(--bw)*-'+(.022*k).toFixed(3)+')) scale('+(1-.032*k).toFixed(3)+')"><path d="'+gemPath()+'" fill="rgb('+r+','+g+','+b+')" fill-opacity=".92" stroke="'+(lt?'#2a5a8a':'#cfeaff')+'" stroke-opacity="'+(k%3===0?.55:.22)+'" stroke-width=".6" stroke-linejoin="round"/></svg>'}return o}
+function gemShadow(){return '<svg viewBox="0 0 100 190" aria-hidden="true"><path d="'+gemPath()+'" fill="#000"/></svg>'}
+var FSV=(function(){var V=[],k,a,r;for(k=0;k<10;k++){a=(-90+k*36)*PI/180;r=k%2?25:48;V.push([50+Math.cos(a)*r,58+Math.sin(a)*r])}return V})();
+function fstarPath(){var d='',n=10,k,P,Q,N,t,A,B;for(k=0;k<n;k++){P=FSV[k];Q=FSV[(k+n-1)%n];N=FSV[(k+1)%n];t=k%2?.2:.27;A=[P[0]+(Q[0]-P[0])*t,P[1]+(Q[1]-P[1])*t];B=[P[0]+(N[0]-P[0])*t,P[1]+(N[1]-P[1])*t];d+=(k?'L':'M')+A[0].toFixed(1)+' '+A[1].toFixed(1)+'Q'+P[0].toFixed(1)+' '+P[1].toFixed(1)+' '+B[0].toFixed(1)+' '+B[1].toFixed(1)}return d+'Z'}
+/* GOLD FOIL STAR BALLOON (kept alongside the solid star): a puffy mylar star. Ten pillowed facets (centre to each edge) are re-shaded every frame from the same key light (diffuse + gloss), softened with a small blur, with creases, a seam, a sweeping foil sheen, a window reflection and a sparkle that flares on whichever tip faces the light. */
+function fstarSvg(c,lt,u,fU,txt,sub){var HI=mix(c.f,'#ffffff',.6),F=c.f,DEEP=mix(c.d,'#2a1500',.5),ST=fstarPath(),SC=lt?'#5d5d6c':'#eceef4',I=function(k){return k+u},S=function(o,col,a){return '<stop offset="'+o+'" stop-color="'+col+'" stop-opacity="'+a+'"/>'},
+ RG=function(k,r,s){return '<radialGradient id="'+I(k)+'" gradientUnits="userSpaceOnUse" cx="50" cy="58" r="'+r+'">'+s+'</radialGradient>'},
+ f2=fU*.34,ls=f2*.16,y1=60+fU*.135,y2=60+fU*.585,k,fac='',cr='',cl='';
+ for(k=0;k<10;k++){var A=FSV[k],B=FSV[(k+1)%10];fac+='<path d="M50 58L'+A[0].toFixed(1)+' '+A[1].toFixed(1)+'L'+B[0].toFixed(1)+' '+B[1].toFixed(1)+'Z" fill="'+F+'" stroke-width=".6" stroke-linejoin="round"/>';
+  cr+='M50 58L'+A[0].toFixed(1)+' '+A[1].toFixed(1)}
+ function T(dy,fill,op){return '<g fill="'+fill+'" fill-opacity="'+op+'" transform="translate(0 '+dy+')"><text x="50" y="'+y1.toFixed(1)+'" font-size="'+fU.toFixed(1)+'" font-weight="900" text-anchor="middle" letter-spacing="-.01em">'+txt+'</text><text x="'+(50+ls/2).toFixed(1)+'" y="'+y2.toFixed(1)+'" font-size="'+f2.toFixed(1)+'" font-weight="800" text-anchor="middle" letter-spacing="'+ls.toFixed(2)+'" opacity=".9">'+sub+'</text></g>'}
+ return '<svg class="sv" viewBox="0 0 100 190" aria-hidden="true"><defs><clipPath id="'+I('cp')+'"><path d="'+ST+'"/></clipPath>'
+ +RG('gd',70,S(0,DEEP,0)+S(.3,DEEP,0)+S(.65,DEEP,.22)+S(1,DEEP,.5))
+ +RG('gl',52,S(0,HI,.55)+S(.45,HI,.2)+S(1,HI,0))
+ +RG('gr',44,S(0,HI,.4)+S(.5,HI,.12)+S(1,HI,0))
+ +'<radialGradient id="'+I('gs')+'"><stop offset="0" stop-color="#fff" stop-opacity=".85"/><stop offset=".55" stop-color="#fff" stop-opacity=".3"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>'
+ +'<linearGradient id="'+I('shg')+'" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".42"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>'
+ +'<linearGradient id="'+I('vg')+'" x1="0" y1="0" x2="1" y2="0">'+S(0,DEEP,1)+S(.35,F,1)+S(.5,HI,1)+S(.7,F,1)+S(1,DEEP,1)+'</linearGradient>'
+ +'<filter id="'+I('bl')+'" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation=".8"/></filter><filter id="'+I('fb')+'" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="2.1"/></filter></defs>'
+ +'<path d="M50 90C42 104 58 116 50 130S44 148 50 160" fill="none" stroke="'+SC+'" stroke-opacity=".8" stroke-width="1.1" stroke-linecap="round"/>'
+ +'<g clip-path="url(#'+I('cp')+')"><rect x="0" y="0" width="100" height="100" fill="'+F+'"/>'
+ +'<g id="'+I('fg')+'" filter="url(#'+I('fb')+')">'+fac+'</g>'
+ +'<path d="'+cr+'" fill="none" stroke="'+DEEP+'" stroke-opacity=".3" stroke-width=".9"/><path d="'+cr+'" transform="translate(.7 .7)" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width=".6"/>'
+ +'<g id="'+I('tg')+'">'+dlStack(T,c)+'</g>'
+ +'<rect x="0" y="0" width="100" height="100" fill="url(#'+I('gd')+')"/><rect x="0" y="0" width="100" height="100" fill="url(#'+I('gl')+')"/><rect x="0" y="0" width="100" height="100" fill="url(#'+I('gr')+')"/>'
+ +'<path d="'+ST+'" fill="none" stroke="'+DEEP+'" stroke-opacity=".55" stroke-width="3.4"/><path d="'+ST+'" transform="translate(50 58) scale(.93) translate(-50 -58)" fill="none" stroke="#fff" stroke-opacity=".3" stroke-width=".8"/>'
+ +'<rect id="'+I('sh')+'" x="-70" y="-7" width="140" height="14" fill="url(#'+I('shg')+')"/>'
+ +'<ellipse id="'+I('sp')+'" rx="11" ry="23" fill="url(#'+I('gs')+')"/>'
+ +'<rect id="'+I('sb')+'" x="-3.600" y="-12" width="7.200" height="24" rx="3.200" fill="#fff" fill-opacity=".9" filter="url(#'+I('bl')+')"/>'
+ +'<ellipse id="'+I('gt')+'" rx="1.600" ry="3.600" fill="#fff"/>'
+ +'<g id="'+I('fx')+'" opacity="0"><ellipse rx=".9" ry="9" fill="#fff"/><ellipse rx="9" ry=".9" fill="#fff"/><circle r="3.600" fill="url(#'+I('gs')+')"/></g></g>'
+ +'<path d="M45 84.500L55 84.500L56.500 93L43.500 93Z" fill="url(#'+I('vg')+')"/><path d="M44 90L56 90" stroke="'+DEEP+'" stroke-opacity=".45" stroke-width=".8"/></svg>'}
+function fstarShadow(){return '<svg viewBox="0 0 100 190" aria-hidden="true"><path d="'+fstarPath()+'" fill="#000"/></svg>'}
+/* 3D POOP (Oct 14, 2026): plays ONLY when the Poop cell is confirmed with Yes (see window.__dlNextKind below), never at random. REAL 3D MESH (like the cow): a lathe-built swirl of three stacked tiers plus a curled tip (36 x 34 quads with a spiral ridge, darker creases between tiers, shiny brown bands). Each frame it is rotated, perspective-projected, back-face culled, depth-sorted and lit per quad from the key light (diffuse + strong specular), then drawn on a <canvas>. The happy face and the +N are flat decals laid on the front surface that fade out as the front turns away. Always brown (like the gold star it ignores the theme colours). The pop at the end bursts into brown scraps and droplets. */
+/* RED BALLOON (Oct 14, 2026): a second balloon colour that joins the teal one in the random mix, taken from each theme's own red/pink accent (original = the site red #ef4444 / #f40f4f, barbie = the hot pink, minecraft = redstone red). Same fields as PAL: f main, e printed text, d dark tone. */
+var RED={original:{dark:{f:'#ef4444',e:'#2a0508',d:'#b91c2c'},light:{f:'#f40f4f',e:'#ffffff',d:'#b8003d'}},
+ barbie:{dark:{f:'#ff5fb4',e:'#3d1030',d:'#d12e86'},light:{f:'#e0218a',e:'#ffffff',d:'#a8136a'}},
+ minecraft:{dark:{f:'#e0483a',e:'#2a0a06',d:'#a82e22'},light:{f:'#c2362a',e:'#ffffff',d:'#8f2219'}}};
+var POOPC={f:'#9a6232',e:'#ffffff',d:'#4a2810'};
+function poopSil(fill){return '<g fill="'+fill+'"><ellipse cx="50" cy="89" rx="45" ry="19"/><ellipse cx="50" cy="65" rx="34" ry="16"/><ellipse cx="50" cy="43" rx="23" ry="13"/><path d="M36 38C38 26 50 24 54 8C68 16 73 30 64 40Z"/></g>'}
+function poopShadow(){return '<svg viewBox="0 0 100 190" aria-hidden="true">'+poopSil('#000')+'</svg>'}
+function poopSvg(c,lt,u){return '<canvas class="sv" id="cv'+u+'" width="2" height="2"></canvas>'}
+var _PM=null;
+function poopMesh(){if(_PM)return _PM;
+ var S=11,CY=.3,NS=36,NR=34,TI=[[-2.0,3.3,1.3],[-.25,2.5,1.2],[1.35,1.7,1.0]],YA=-3.3,YB=3.9,Y=[],V=[],Q=[],k,s,i;
+ function rad(y){var rs=[0,0,0,0],i,t;for(i=0;i<3;i++){t=(y-TI[i][0])/TI[i][2];rs[i]=Math.abs(t)<1?TI[i][1]*Math.sqrt(1-t*t):0}
+  if(y>1.6&&y<YB){t=(y-1.6)/(YB-1.6);rs[3]=1.35*Math.pow(1-t,.85)}
+  rs.sort(function(p,q){return q-p});return [rs[0],rs[1]]}
+ function off(y){var w=Math.max(0,Math.min(1,(y-1.0)/2.9));return .9*w*w}
+ window.__poopRad=function(y,th){return rad(y)[0]*(1+.06*Math.sin(3*th+y*2.3))};
+ for(k=0;k<=NR;k++)Y.push(YA+(YB-YA)*(1-Math.cos(Math.PI*k/NR))/2);
+ for(k=0;k<=NR;k++)for(s=0;s<NS;s++){var y=Y[k],th=2*Math.PI*s/NS,r=rad(y)[0]*(1+.06*Math.sin(3*th+y*2.3)),ox=off(y);V.push({m:[r*Math.cos(th)+ox,y,r*Math.sin(th)],ox:ox,th:th})}
+ for(k=0;k<NR;k++)for(s=0;s<NS;s++){var s1=(s+1)%NS,ia=k*NS+s,ib=k*NS+s1,ic=(k+1)*NS+s1,id=(k+1)*NS+s,A=V[ia].m,B=V[ib].m,C=V[ic].m,D=V[id].m,
+   d1=[C[0]-A[0],C[1]-A[1],C[2]-A[2]],d2=[D[0]-B[0],D[1]-B[1],D[2]-B[2]],n=[d1[1]*d2[2]-d1[2]*d2[1],d1[2]*d2[0]-d1[0]*d2[2],d1[0]*d2[1]-d1[1]*d2[0]],nl=Math.sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]);
+  if(nl<1e-7)continue;n=[n[0]/nl,n[1]/nl,n[2]/nl];
+  var cx=(A[0]+B[0]+C[0]+D[0])/4,cy=(A[1]+B[1]+C[1]+D[1])/4,cz=(A[2]+B[2]+C[2]+D[2])/4,ox2=V[ia].ox;
+  if(n[0]*(cx-ox2)+n[2]*cz+n[1]*(cy>0?.2:-.2)*0<0)n=[-n[0],-n[1],-n[2]];
+  var rr=rad(cy),clo=rr[0]>.3?rr[1]/rr[0]:0,ao=1-.42*Math.max(0,Math.min(1,(clo-.8)/.18)),
+   th2=2*Math.PI*(s+.5)/NS,band=.5+.5*Math.sin(3*th2+cy*2.3),
+   lo=[96,56,24],hi=[168,108,54],cr=lo[0]+(hi[0]-lo[0])*(.35+.55*band),cg=lo[1]+(hi[1]-lo[1])*(.35+.55*band),cb=lo[2]+(hi[2]-lo[2])*(.35+.55*band);
+  Q.push({v:[ia,ib,ic,id],n:[n[0],-n[1],n[2]],c:[(cx-0)*S,-(cy-CY)*S,cz*S],col:[cr*ao,cg*ao,cb*ao]})}
+ return _PM={V:V.map(function(v){return [v.m[0]*S,-(v.m[1]-CY)*S,v.m[2]*S]}),Q:Q,S:S,CY:CY}}
+function poopDraw(x,k,yaw,tx,Lx,Ly,hx,hy,hz,txt,sub){var M=poopMesh(),cp=Math.cos(yaw),sp=Math.sin(yaw),ct=Math.cos(tx),st=Math.sin(tx),i,j,V=M.V,Q=M.Q,R=[],vis=[],font='system-ui,-apple-system,sans-serif',S=M.S;
+ x.setTransform(k,0,0,k,0,0);x.clearRect(0,0,100,190);x.lineJoin='round';x.lineWidth=.3;
+ function T(X,Y,Z){var x1=X*cp+Z*sp,z1=-X*sp+Z*cp,y2=Y*ct-z1*st,z2=Y*st+z1*ct,ff=300/(300-z2);return [50+x1*ff,58+y2*ff,z2,x1,y2]}
+ for(i=0;i<V.length;i++)R.push(T(V[i][0],V[i][1],V[i][2]));
+ for(i=0;i<Q.length;i++){var q=Q[i],n=q.n,nx=n[0]*cp+n[2]*sp,nz1=-n[0]*sp+n[2]*cp,ny=n[1]*ct-nz1*st,nz=n[1]*st+nz1*ct,a=R[q.v[0]],b=R[q.v[1]],c=R[q.v[2]],d=R[q.v[3]],
+   mx=(a[3]+b[3]+c[3]+d[3])/4,my=(a[4]+b[4]+c[4]+d[4])/4,mz=(a[2]+b[2]+c[2]+d[2])/4;
+  if(-nx*mx-ny*my+nz*(300-mz)<=0)continue;vis.push([mz,i,nx,ny,nz])}
+ vis.sort(function(u,w){return u[0]-w[0]});
+ for(j=0;j<vis.length;j++){var e=vis[j],q2=Q[e[1]],lam=Math.max(.05,e[2]*Lx+e[3]*Ly+e[4]*SE),spc=Math.pow(Math.max(0,e[2]*hx+e[3]*hy+e[4]*hz),22)*150,f=.3+.85*lam,
+   col='rgb('+Math.min(255,Math.round(q2.col[0]*f+spc))+','+Math.min(255,Math.round(q2.col[1]*f+spc*.9))+','+Math.min(255,Math.round(q2.col[2]*f+spc*.8))+')',
+   a2=R[q2.v[0]],b2=R[q2.v[1]],c2=R[q2.v[2]],d2=R[q2.v[3]];
+  x.fillStyle=col;x.strokeStyle=col;x.beginPath();x.moveTo(a2[0],a2[1]);x.lineTo(b2[0],b2[1]);x.lineTo(c2[0],c2[1]);x.lineTo(d2[0],d2[1]);x.closePath();x.fill();x.stroke()}
+ /* face and +N printed on the front (+z), as flat decals on the tangent plane, fading out as the front turns away */
+ var al=Math.max(0,Math.min(1,(cp*ct-.25)/.4));
+ function decal(my,fn){var r=window.__poopRad(my,Math.PI/2)+.03,P=[0,-(my-M.CY)*S,r*S],P0=T(P[0],P[1],P[2]),Pu=T(P[0]+S,P[1],P[2]),Pv=T(P[0],P[1]+S,P[2]);
+  x.save();x.globalAlpha=al;x.setTransform(k*(Pu[0]-P0[0])/20,k*(Pu[1]-P0[1])/20,k*(Pv[0]-P0[0])/20,k*(Pv[1]-P0[1])/20,k*P0[0],k*P0[1]);fn();x.restore();x.setTransform(k,0,0,k,0,0)}
+ if(al>0){
+  decal(-.1,function(){var sd=[-1,1],i2;
+   for(i2=0;i2<2;i2++){var ex=sd[i2]*15;x.fillStyle='#fff';x.beginPath();x.ellipse(ex,-8,8.5,10.5,0,0,6.2832);x.fill();x.fillStyle='#1b0d05';x.beginPath();x.arc(ex+sd[i2]*-1.5,-5.5,5,0,6.2832);x.fill();x.fillStyle='#fff';x.beginPath();x.arc(ex+sd[i2]*-1.5+1.8,-7.8,1.8,0,6.2832);x.fill();
+    x.fillStyle='rgba(255,130,150,.45)';x.beginPath();x.arc(sd[i2]*25,7,4.4,0,6.2832);x.fill()}
+   x.fillStyle='#2a0f06';x.beginPath();x.moveTo(-12,5);x.quadraticCurveTo(0,26,12,5);x.closePath();x.fill();x.fillStyle='#d9626b';x.beginPath();x.moveTo(-6,11.5);x.quadraticCurveTo(0,8.5,6,11.5);x.quadraticCurveTo(0,17,-6,11.5);x.fill()});
+  decal(-2.1,function(){var fs=Math.min(30,60/(txt.length*.62));x.textAlign='center';x.textBaseline='middle';
+   x.font='900 '+fs+'px '+font;x.lineWidth=fs*.22;x.strokeStyle='#4a2810';x.fillStyle='#fff';x.strokeText(txt,0,-5);x.fillText(txt,0,-5);
+   x.font='800 9px '+font;x.lineWidth=3;x.strokeText(sub,0,fs*.5+4);x.fillText(sub,0,fs*.5+4)})}}
+/* 3D COW (Oct 14, 2026): is a secret unlockable: it joins the random +points rotation only after Shower and Brush Teeth have both been completed once (see the COW UNLOCK script). Unlike the flat/stacked kinds this is a real mesh like the diamond: a blocky spotted cow built from boxes (body, 4 legs, head, muzzle, horns, ears, udder, tail) whose faces are cut into small cells coloured white/black/pink, so the spots wrap around corners. Every frame the whole mesh is rotated (sway yaw + a slow downward tilt), perspective-projected, back-faces culled, objects sorted far to near, and each face lit from the same key light (diffuse + a small specular) and drawn on a <canvas>. The +N is printed on both flanks as a decal that follows the flank's 3D plane. Always black and white (ignores the theme colours). */
+var COWC={f:'#f4f0e6',e:'#15121a',d:'#3a3238'},_CWM=null;
+function cowMesh(){if(_CWM)return _CWM;
+ var S=10.4,CX=-.85,CY=.25,O=[],W=[238,234,224],K=[38,32,38],PK=[238,152,162],HN=[214,186,142],G=[72,66,72],
+ SP=[[-1.3,.9,1.5,1.15],[1.9,-.7,1.5,.85],[2.0,.9,-1.5,.85],[-2.0,-.4,-1.5,.95],[.6,1.25,.3,1.1],[-1.3,1.25,-.8,.8],[-2.6,.3,0,1.0],[1.4,1.25,-.9,.6]];
+ function spot(x,y,z){for(var i=0;i<SP.length;i++){var s=SP[i];if(Math.sqrt((x-s[0])*(x-s[0])+(y-s[1])*(y-s[1])+(z-s[2])*(z-s[2]))<s[3])return 1}return 0}
+ function sc(a){return [(a[0]-CX)*S,-(a[1]-CY)*S,a[2]*S]}
+ function box(x0,x1,y0,y1,z0,z1,cl,fn,skip,bias,dc){var o={f:[],c:sc([(x0+x1)/2,(y0+y1)/2,(z0+z1)/2]),b:bias||0,dc:[]},lo=[x0,y0,z0],hi=[x1,y1,z1],ax,sg,i,j;
+  for(ax=0;ax<3;ax++)for(sg=-1;sg<=1;sg+=2){var id=(sg>0?'+':'-')+'xyz'.charAt(ax);if(skip&&skip.indexOf(id)>=0)continue;
+   var a1=(ax+1)%3,a2=(ax+2)%3,pl=sg>0?hi[ax]:lo[ax],n1=Math.max(1,Math.round((hi[a1]-lo[a1])/cl)),n2=Math.max(1,Math.round((hi[a2]-lo[a2])/cl)),nn=[0,0,0],fc=[(x0+x1)/2,(y0+y1)/2,(z0+z1)/2];nn[ax]=sg;fc[ax]=pl;
+   var fa={id:id,n:[nn[0],-nn[1],nn[2]],c:sc(fc),cl:[]};
+   for(i=0;i<n1;i++)for(j=0;j<n2;j++){var t0=lo[a1]+(hi[a1]-lo[a1])*i/n1,t1=lo[a1]+(hi[a1]-lo[a1])*(i+1)/n1,u0=lo[a2]+(hi[a2]-lo[a2])*j/n2,u1=lo[a2]+(hi[a2]-lo[a2])*(j+1)/n2,
+    pt=function(tt,uu){var r=[0,0,0];r[ax]=pl;r[a1]=tt;r[a2]=uu;return r},m=pt((t0+t1)/2,(u0+u1)/2);
+    fa.cl.push({q:[sc(pt(t0,u0)),sc(pt(t1,u0)),sc(pt(t1,u1)),sc(pt(t0,u1))],c:fn(m[0],m[1],m[2],id)})}
+   o.f.push(fa)}
+  (dc||[]).forEach(function(d){o.dc.push({id:d[0],c:sc(d[1]),u:d[2]})});O.push(o)}
+ var bodyC=function(x,y,z,id){return id==='-y'?W:spot(x,y,z)?K:W};
+ box(-2.5,2.5,-1.25,1.25,-1.5,1.5,.5,bodyC,null,0,[['+z',[0,.05,1.5],[1,0,0]],['-z',[0,.05,-1.5],[-1,0,0]]]);
+ [[1.5,2.5],[-2.5,-1.5]].forEach(function(xr){[[.5,1.5],[-1.5,-.5]].forEach(function(zr){box(xr[0],xr[1],-3.25,-1.25,zr[0],zr[1],.5,function(x,y,z,id){return y<-2.75?G:W},['+y'],0)})});
+ box(-1.5,-.5,-1.65,-1.25,-.5,.5,.25,function(){return PK},['+y'],-4);
+ box(2.4,4.2,-.05,1.75,-.9,.9,.3,function(x,y,z,id){if(id==='+x'&&y>.85&&y<1.15&&Math.abs(Math.abs(z)-.45)<.1)return K;if(id!=='+x'&&Math.sqrt((x-3.3)*(x-3.3)+(y-1.1)*(y-1.1)+(z+.9)*(z+.9))<.8)return K;return W},['-x'],0);
+ box(4.2,4.7,-.05,.9,-.65,.65,.32,function(x,y,z,id){return(id==='+x'&&Math.abs(y-.43)<.1&&Math.abs(Math.abs(z)-.4875)<.1)?K:PK},['-x'],.3);
+ box(3.0,3.4,1.75,2.4,-.85,-.5,.3,function(){return HN},['-y'],.2);box(3.0,3.4,1.75,2.4,.5,.85,.3,function(){return HN},['-y'],.2);
+ box(2.7,3.2,1.0,1.45,.9,1.55,.25,function(){return K},['-z'],.2);box(2.7,3.2,1.0,1.45,-1.55,-.9,.25,function(){return K},['+z'],.2);
+ box(-2.9,-2.5,-1.0,1.0,-.15,.15,.3,function(x,y,z,id){return y<-.5?W:K},['+x'],0);
+ return _CWM=O}
+function cowShadow(){return '<svg viewBox="0 0 100 190" aria-hidden="true"><g fill="#000"><rect x="12" y="34" width="60" height="32" rx="11"/><rect x="62" y="28" width="26" height="24" rx="7"/><rect x="16" y="60" width="11" height="24" rx="3"/><rect x="56" y="60" width="11" height="24" rx="3"/></g></svg>'}
+function cowSvg(c,lt,u){return '<canvas class="sv" id="cv'+u+'" width="2" height="2"></canvas>'}
+function cowDraw(x,k,yaw,tx,Lx,Ly,hx,hy,hz,txt,sub){var M=cowMesh(),cp=Math.cos(yaw),sp=Math.sin(yaw),ct=Math.cos(tx),st=Math.sin(tx),i,j,m,o,fa,ce,ord=[],vis,dc,d,P0,Pu,Pv,fs,font='system-ui,-apple-system,sans-serif';
+ function T(X,Y,Z){var x1=X*cp+Z*sp,z1=-X*sp+Z*cp,y2=Y*ct-z1*st,z2=Y*st+z1*ct,ff=300/(300-z2);return [50+x1*ff,58+y2*ff,z2,x1,y2]}
+ x.setTransform(k,0,0,k,0,0);x.clearRect(0,0,100,190);x.lineJoin='round';x.lineWidth=.32;
+ for(i=0;i<M.length;i++){ce=T(M[i].c[0],M[i].c[1],M[i].c[2]);ord.push([ce[2]+M[i].b*10.4,i])}
+ ord.sort(function(a,b){return a[0]-b[0]});
+ for(i=0;i<ord.length;i++){o=M[ord[i][1]];vis={};
+  for(j=0;j<o.f.length;j++){fa=o.f[j];var nx=fa.n[0]*cp+fa.n[2]*sp,nz1=-fa.n[0]*sp+fa.n[2]*cp,ny=fa.n[1]*ct-nz1*st,nz=fa.n[1]*st+nz1*ct;ce=T(fa.c[0],fa.c[1],fa.c[2]);
+   if(-nx*ce[3]-ny*ce[4]+nz*(300-ce[2])<=0)continue;vis[fa.id]=1;
+   var lam=Math.max(.05,nx*Lx+ny*Ly+nz*SE),spc=Math.pow(Math.max(0,nx*hx+ny*hy+nz*hz),26)*70,f=.36+.8*lam,sh=(1-Math.min(1,f))*16;
+   for(m=0;m<fa.cl.length;m++){var cl=fa.cl[m],q=cl.q,a=T(q[0][0],q[0][1],q[0][2]),b=T(q[1][0],q[1][1],q[1][2]),c2=T(q[2][0],q[2][1],q[2][2]),e=T(q[3][0],q[3][1],q[3][2]),
+     col='rgb('+Math.min(255,Math.round(cl.c[0]*f+spc))+','+Math.min(255,Math.round(cl.c[1]*f+spc))+','+Math.min(255,Math.round(cl.c[2]*f+spc+sh))+')';
+    x.fillStyle=col;x.strokeStyle=col;x.beginPath();x.moveTo(a[0],a[1]);x.lineTo(b[0],b[1]);x.lineTo(c2[0],c2[1]);x.lineTo(e[0],e[1]);x.closePath();x.fill();x.stroke()}}
+  for(j=0;j<o.dc.length;j++){dc=o.dc[j];if(!vis[dc.id])continue;
+   P0=T(dc.c[0],dc.c[1],dc.c[2]);Pu=T(dc.c[0]+dc.u[0]*10.4,dc.c[1],dc.c[2]+dc.u[2]*10.4);Pv=T(dc.c[0],dc.c[1]+10.4,dc.c[2]);
+   x.setTransform(k*(Pu[0]-P0[0])/20,k*(Pu[1]-P0[1])/20,k*(Pv[0]-P0[0])/20,k*(Pv[1]-P0[1])/20,k*P0[0],k*P0[1]);
+   fs=Math.min(26,64/(txt.length*.62));x.textAlign='center';x.textBaseline='middle';x.lineJoin='round';
+   x.font='900 '+fs+'px '+font;x.lineWidth=fs*.2;x.strokeStyle='rgba(255,255,255,.96)';x.fillStyle='#1b1520';x.strokeText(txt,0,-6);x.fillText(txt,0,-6);
+   x.font='800 9px '+font;x.lineWidth=3;x.strokeText(sub,0,fs*.5+3);x.fillText(sub,0,fs*.5+3);
+   x.setTransform(k,0,0,k,0,0)}}}
+function fly(n,kind){var kd0=(kind==='star'||kind==='gem'||kind==='balloon'||kind==='red'||kind==='foil'||kind==='poop'||kind==='cow')?kind:(function(){var a=['balloon','red','foil','star','gem'];try{if(localStorage.getItem('daddys-list-cow-unlocked')==='1')a.push('cow')}catch(e){}return a[Math.floor(Math.random()*a.length)]})(),rd=kd0==='red',kd=rd?'balloon':kd0,star=kd==='star',gem=kd==='gem',foil=kd==='foil',poop=kd==='poop',cow=kd==='cow',solid=star||gem||poop||cow,P=pal(),c=cow?COWC:poop?POOPC:star?ROSE:foil?STAR:rd?(RED[P.th]||RED.original)[P.lt?'light':'dark']:P.c,lt=P.lt,w=window.innerWidth||390,hh=window.innerHeight||700,amt=Math.round(n*100)/100,txt='+'+amt,len=txt.length,sub=(amt===1?'point':'points').toUpperCase();
+ var sz=Math.min(w*.3,w*.2*(1+Math.log(n+1)/Math.LN10*.3)),fs=sz*.8,bw=Math.min(w*.62,Math.max(sz*1.7,len*fs*.64+fs*.7));fs=Math.min(fs,bw/(len*.64+.7));
+ var fU=Math.min(100*fs/bw,44,76/(len*.62+.1));if(solid)bw=Math.min(w*.66,bw*1.12);if(star)fU=Math.min(fU,24,28/(len*.62+.1));if(poop)fU=Math.min(fU,20,56/(len*.62+.1));if(foil)fU=Math.min(fU,32,46/(len*.62+.1));if(gem)fU=Math.min(fU,20,32/(len*.62+.1));var GMD=lt?[34,66,108]:[8,30,64],GMF=lt?[205,228,246]:[170,214,244],GMH=[255,255,255];
+ var ang=-Math.PI/2+(Math.random()*1.1-.55),dist=hh*(.36+Math.random()*.14),u=Math.random().toString(36).slice(2,7);
+ var HI=mix(c.f,'#ffffff',.55),DEEP=mix(c.d,'#000000',.3);
+ var d=document.createElement('div');d.className='dl-plus'+(P.th==='minecraft'?' mc':'');d.setAttribute('aria-hidden','true');
+ d.style.left=(50+(Math.random()*16-8))+'%';d.style.top='64%';
+ d.style.setProperty('--pf',c.f);d.style.setProperty('--pe',c.e);d.style.setProperty('--pd',c.d);d.style.setProperty('--pg',mix(c.f,'#ffffff',.2));d.style.setProperty('--bw',Math.round(bw)+'px');d.style.setProperty('--so',lt?.3:.5);
+ d.style.setProperty('--dx',Math.round(Math.cos(ang)*dist)+'px');d.style.setProperty('--dy',Math.round(Math.sin(ang)*dist)+'px');
+ var h='<div class="bl"><div class="cs'+((solid||foil)?' st">'+(star?starShadow():gem?gemShadow():poop?poopShadow():cow?cowShadow():fstarShadow()):'">')+'</div><div class="sw">'+(cow?cowSvg:poop?poopSvg:star?starSvg:gem?gemSvg:foil?fstarSvg:balloonSvg)(c,lt,u,fU,txt,sub)+'<i class="mk"></i></div></div><div class="bst"><div class="fl"></div><div class="ring"></div><div class="ring r2"></div>';
+ function pts(){var k=3+Math.floor(Math.random()*3),o=[],i;for(i=0;i<k;i++){var a=i/k*Math.PI*2+Math.random()*.7,r=34+Math.random()*16;o.push(Math.round(50+Math.cos(a)*r)+'% '+Math.round(50+Math.sin(a)*r)+'%')}return 'polygon('+o.join(',')+')'}
+ for(var i=0;i<14;i++){var a=(i/14)*Math.PI*2+Math.random()*.4,r=w*(.12+Math.random()*.15),s=16+Math.round(Math.random()*16);h+='<i class="sh" style="--sw:'+s+'px;--sa:'+HI+';--sb:'+c.f+';--sc:'+DEEP+';clip-path:'+pts()+';--bx:'+Math.round(Math.cos(a)*r)+'px;--by:'+Math.round(Math.sin(a)*r)+'px;--rx:'+Math.round(Math.random()*200-100)+'deg;--ry:'+Math.round(Math.random()*200-100)+'deg;--br:'+Math.round(Math.random()*540-270)+'deg;animation-delay:'+(2.02+Math.random()*.06).toFixed(2)+'s"></i>'}
+ for(var j=0;j<10;j++){var b2=Math.random()*Math.PI*2,r2=w*(.14+Math.random()*.2),s2=4+Math.round(Math.random()*5);h+='<i class="dp" style="--sw:'+s2+'px;--sa:'+HI+';--sb:'+c.f+';--sc:'+DEEP+';--bx:'+Math.round(Math.cos(b2)*r2)+'px;--by:'+Math.round(Math.sin(b2)*r2)+'px;animation-delay:'+(2.02+Math.random()*.08).toFixed(2)+'s"></i>'}
+ var dxv=parseFloat(d.style.getPropertyValue('--dx'))||0,x0=parseFloat(d.style.left)/100*w+dxv,half=Math.min(w*.39,165),cxm=Math.max(half+8,Math.min(w-half-8,x0));d.innerHTML=h+dlMsgHtml(dlPick(P.th,kd),Math.round(cxm-x0))+'</div>';document.body.appendChild(d);dlMsgAim(d);setTimeout(function(){if(d.parentNode)d.parentNode.removeChild(d)},4600);
+ var q=function(k){return d.querySelector('#'+k+u)},R={cv:q('cv'),rf:gem?d.querySelectorAll('#rf'+u+' path'):null,fc:(solid||foil)?d.querySelectorAll('#fg'+u+' path'):null,gd:q('gd'),gl:q('gl'),gr:q('gr'),kn:q('kn'),tg:q('tg'),sp:q('sp'),sb:q('sb'),gt:q('gt'),b2:q('b2'),sh:q('sh'),fx:q('fx'),fg:q('fg')},sw=d.querySelector('.sw'),mk=d.querySelector('.mk'),cs=d.querySelector('.cs'),LX=-.4*w,LY=.08*hh;
+ function set(e,o){for(var k in o)e.setAttribute(k,o[k])}
+ /* ONE fixed key light up and to the left of the screen. Every frame the balloon's real on-screen position and tilt decide where the lit side, the terminator, the far-side rim light, the window reflection, the knot shading and the cast shadow go. The printed text sits UNDER all of the shading and turns around the surface while the reflections stay put. */
+ var cw=null;
+function lit(sx,sy,th,ph,p){var lx=LX-sx,ly=LY-sy,m=Math.sqrt(lx*lx+ly*ly)||1,qq=-th*PI/180,cq=Math.cos(qq),sq=Math.sin(qq),ux,uy,Lx,Ly,hm,hx,hy,ha,pr=ph*PI/180,off;lx/=m;ly/=m;
+  ux=lx*cq-ly*sq;uy=lx*sq+ly*cq;Lx=ux*CE;Ly=uy*CE;hm=Math.sqrt(Lx*Lx+Ly*Ly+(SE+1)*(SE+1));hx=Lx/hm;hy=Ly/hm;ha=Math.atan2(hy,hx)*180/PI;
+  if(star){var M=starMesh(),cp=Math.cos(pr),sp2=Math.sin(pr),tx=14*Math.sin(p*6)*PI/180,ct=Math.cos(tx),st=Math.sin(tx),hz=(SE+1)/hm,best=-9,bi=0,k,i,q,V3=[],PV=[],F,pts,A,B,C,ax,ay,az,bx,by,bz,nx,ny,nz,nn,mx,my,mz,lam,sp,col,ord=[],dt,X,Y,Z,x1,y2,z1,z2,ff,vm,zt=9;
+   for(i=0;i<M.V.length;i++){q=M.V[i];X=q[0];Y=q[1];Z=q[2];x1=X*cp+Z*sp2;z1=-X*sp2+Z*cp;y2=Y*ct-z1*st;z2=Y*st+z1*ct;ff=300/(300-z2);V3[i]=[x1,y2,z2];PV[i]=[50+x1*ff,58+y2*ff]}
+   for(k=0;k<M.F.length;k++){F=M.F[k];A=V3[F[0]];B=V3[F[1]];C=V3[F[2]];ax=B[0]-A[0];ay=B[1]-A[1];az=B[2]-A[2];bx=C[0]-A[0];by=C[1]-A[1];bz=C[2]-A[2];nx=ay*bz-az*by;ny=az*bx-ax*bz;nz=ax*by-ay*bx;nn=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;nx/=nn;ny/=nn;nz/=nn;mx=0;my=0;mz=0;pts='';
+    for(i=0;i<F.length;i++){mx+=V3[F[i]][0];my+=V3[F[i]][1];mz+=V3[F[i]][2];pts+=(i?'L':'M')+PV[F[i]][0].toFixed(1)+' '+PV[F[i]][1].toFixed(1)}
+    mx/=F.length;my/=F.length;mz/=F.length;if(nx*mx+ny*my+nz*mz<0){nx=-nx;ny=-ny;nz=-nz}
+    if(nz<=.02){R.fc[k].setAttribute('display','none');continue}
+    R.fc[k].removeAttribute('display');
+    lam=Math.max(.06,nx*Lx+ny*Ly+nz*SE);sp=Math.pow(Math.max(0,nx*hx+ny*hy+nz*hz),22);
+    col=lam<.5?lerp3(GD,GF,lam/.5):lerp3(GF,GH,Math.min(1,(lam-.5)/.45));col=lerp3(col,[255,242,236],Math.min(1,sp*1.1));
+    R.fc[k].setAttribute('d',pts+'Z');R.fc[k].setAttribute('fill',rgb3(col));ord.push([mz,k])}
+   ord.sort(function(u1,u2){return u1[0]-u2[0]});for(i=0;i<ord.length;i++)R.fc[ord[i][1]].parentNode.appendChild(R.fc[ord[i][1]]);
+   for(k=0;k<10;k+=2){vm=Math.sqrt(V3[k][0]*V3[k][0]+V3[k][1]*V3[k][1])||1;dt=(V3[k][0]*ux+V3[k][1]*uy)/vm;if(V3[k][2]>-4&&dt>best){best=dt;bi=k}}
+   set(R.fx,{transform:'translate('+PV[bi][0].toFixed(1)+' '+PV[bi][1].toFixed(1)+') rotate(45)',opacity:Math.max(0,Math.min(1,(best-.6)*2.6)).toFixed(2)});
+   dlLayers(R.tg,cp,sp2,ct,st,Lx,Ly,8.6,9.2,1.1,3)
+  }else if(foil){var k,A,B,mx,my,mm,nx,ny,nz,nn,lam,sp,col,hz=(SE+1)/hm,best=-9,bi=0,dt,a2;for(k=0;k<10;k++){A=FSV[k];B=FSV[(k+1)%10];mx=(A[0]+B[0])/2-50;my=(A[1]+B[1])/2-58;mm=Math.sqrt(mx*mx+my*my)||1;nx=mx/mm*.95;ny=my/mm*.95;nn=Math.sqrt(nx*nx+ny*ny+1);nx/=nn;ny/=nn;nz=1/nn;lam=Math.max(.1,nx*Lx+ny*Ly+nz*SE);sp=Math.pow(Math.max(0,nx*hx+ny*hy+nz*hz),14);col=lam<.55?lerp3(FGD,FGF,lam/.55):lerp3(FGF,FGH,Math.min(1,(lam-.55)/.4));col=lerp3(col,[255,255,255],Math.min(1,sp*1.2));R.fc[k].setAttribute('fill',rgb3(col))}
+   for(k=0;k<10;k+=2){a2=(-90+k*36)*PI/180;dt=ux*Math.cos(a2)+uy*Math.sin(a2);if(dt>best){best=dt;bi=k}}a2=(-90+bi*36)*PI/180;
+   set(R.fx,{transform:'translate('+(50+Math.cos(a2)*43)+' '+(58+Math.sin(a2)*43)+') rotate('+(a2*180/PI+45)+')',opacity:Math.max(0,Math.min(1,(best-.62)*2.6)).toFixed(2)});
+   set(R.gd,{cx:50+Lx*20,cy:58+Ly*20});set(R.gl,{cx:50+Lx*26,cy:58+Ly*28});set(R.gr,{cx:50-Lx*34,cy:58-Ly*34});
+   set(R.sh,{transform:'translate('+(50+hx*30)+' '+(58+hy*30)+') rotate('+(Math.atan2(uy,ux)*180/PI+90)+')'});
+   set(R.sp,{transform:'translate('+(50+hx*34)+' '+(58+hy*34)+') rotate('+ha+')'});set(R.sb,{transform:'translate('+(50+hx*38)+' '+(58+hy*38)+') rotate('+ha+')'});set(R.gt,{transform:'translate('+(50+hx*38)+' '+(58+hy*38)+') rotate('+ha+') translate(0 7)'});
+  }else if(gem){var M=gemMesh(),cp=Math.cos(pr),sp2=Math.sin(pr),tx=22*Math.sin(p*6)*PI/180,ct=Math.cos(tx),st=Math.sin(tx),hz=(SE+1)/hm,best=-9,bi=0,ab=lt?.2:0,k,i,q,V3=[],PV=[],F,pts,A,B,C,ax,ay,az,bx,by,bz,nx,ny,nz,nn,mx,my,mz,lam,sp,col,al,fr,ord=[],vx,vy,vm,dt,X,Y,Z,x1,y2,z1,z2,ff;
+   for(i=0;i<M.V.length;i++){q=M.V[i];X=q[0];Y=q[1]-58;Z=q[2];x1=X*cp+Z*sp2;z1=-X*sp2+Z*cp;y2=Y*ct-z1*st;z2=Y*st+z1*ct;ff=300/(300-z2);V3[i]=[x1,y2,z2];PV[i]=[50+x1*ff,58+y2*ff]}
+   for(k=0;k<M.F.length;k++){F=M.F[k];A=V3[F[0]];B=V3[F[1]];C=V3[F[2]];ax=B[0]-A[0];ay=B[1]-A[1];az=B[2]-A[2];bx=C[0]-A[0];by=C[1]-A[1];bz=C[2]-A[2];nx=ay*bz-az*by;ny=az*bx-ax*bz;nz=ax*by-ay*bx;nn=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;nx/=nn;ny/=nn;nz/=nn;mx=0;my=0;mz=0;pts='';
+    for(i=0;i<F.length;i++){mx+=V3[F[i]][0];my+=V3[F[i]][1];mz+=V3[F[i]][2];pts+=(i?'L':'M')+PV[F[i]][0].toFixed(1)+' '+PV[F[i]][1].toFixed(1)}
+    mx/=F.length;my/=F.length;mz/=F.length;if(nx*mx+ny*my+nz*mz<0){nx=-nx;ny=-ny;nz=-nz}
+    fr=nz>0;lam=Math.max(.04,nx*Lx+ny*Ly+nz*SE);sp=Math.pow(Math.max(0,nx*hx+ny*hy+nz*hz),M.T[k]?9:15);
+    if(!fr){lam=lam*.5+.18;sp*=.4}
+    col=lam<.5?lerp3(GMD,GMF,lam/.5):lerp3(GMF,GMH,Math.min(1,(lam-.5)/.45));
+    col=lerp3(col,hsl3((k*47+ph*3+lam*90)%360),Math.min(.5,.08+sp*1.1));col=lerp3(col,[255,255,255],Math.min(1,sp*1.2));
+    al=fr?Math.min(1,.34+ab+.62*lam+sp*.9):Math.min(.7,.12+.3*lam+sp*.5);
+    R.fc[k].setAttribute('d',pts+'Z');R.fc[k].setAttribute('fill',rgb3(col));R.fc[k].setAttribute('fill-opacity',al.toFixed(2));R.fc[k].setAttribute('stroke-opacity',(fr?.85:.3).toFixed(2));ord.push([mz,k])}
+   ord.sort(function(u1,u2){return u1[0]-u2[0]});for(i=0;i<ord.length;i++)R.fc[ord[i][1]].parentNode.appendChild(R.fc[ord[i][1]]);
+   for(i=0;i<8;i++){vx=V3[i][0];vy=V3[i][1];vm=Math.sqrt(vx*vx+vy*vy)||1;dt=(vx*ux+vy*uy)/vm;if(V3[i][2]>-12&&dt>best){best=dt;bi=i}}
+   set(R.fx,{transform:'translate('+PV[bi][0].toFixed(1)+' '+PV[bi][1].toFixed(1)+') rotate(45)',opacity:Math.max(0,Math.min(1,(best-.5)*2.2)).toFixed(2)});
+   dlLayers(R.tg,cp,sp2,ct,st,Lx,Ly,24,30,1.4,2.5);set(R.sh,{transform:'translate('+(50+hx*24-sp2*10)+' '+(58+hy*24)+') rotate('+(Math.atan2(uy,ux)*180/PI+90)+')'});
+   set(R.sp,{transform:'translate('+(50+hx*28)+' '+(54+hy*26)+') rotate('+ha+')'});set(R.sb,{transform:'translate('+(50+hx*32)+' '+(54+hy*30)+') rotate('+ha+')'});set(R.gt,{transform:'translate('+(50+hx*32)+' '+(54+hy*30)+') rotate('+ha+') translate(0 6)'});
+  }else if(cow||poop){if(!cw){var dp=Math.min(2,window.devicePixelRatio||1);R.cv.width=Math.round(bw*dp);R.cv.height=Math.round(bw*1.9*dp);cw={x:R.cv.getContext('2d'),k:R.cv.width/100}}
+   (cow?cowDraw(cw.x,cw.k,pr*.8-.52,(12+14*Math.sin(p*6))*PI/180,Lx,Ly,hx,hy,(SE+1)/hm,txt,sub):poopDraw(cw.x,cw.k,pr*.9,(14+14*Math.sin(p*6))*PI/180,Lx,Ly,hx,hy,(SE+1)/hm,txt,sub))
+  }else{
+  set(R.gd,{cx:50+Lx*26,cy:58+Ly*31});set(R.gl,{cx:50+Lx*33,cy:58+Ly*39});set(R.gr,{cx:50-Lx*45,cy:58-Ly*53});
+  set(R.kn,{x1:50+Lx*9,y1:122+Ly*9,x2:50-Lx*9,y2:122-Ly*9});
+  set(R.sp,{transform:'translate('+(50+hx*51)+' '+(58+hy*60)+') rotate('+ha+')'});
+  set(R.sb,{transform:'translate('+(50+hx*56)+' '+(58+hy*66)+') rotate('+ha+')'});
+  set(R.gt,{transform:'translate('+(50+hx*56)+' '+(58+hy*66)+') rotate('+ha+') translate(0 8)'});
+  set(R.b2,{transform:'translate('+(50-hx*38)+' '+(58-hy*46)+') rotate('+ha+')'});}
+  if(!solid)set(R.tg,{transform:'translate('+(Math.sin(pr)*(foil?24:42))+' 0) translate(50 0) scale('+Math.cos(pr)+' 1) translate(-50 0)'});
+  off=bw*(.07+.15*p);cs.style.transform='translate('+(-lx*off).toFixed(1)+'px,'+(-ly*off).toFixed(1)+'px)';cs.style.opacity=(1-.45*p).toFixed(2)}
+ function park(p,th,ph){var r=mk.getBoundingClientRect();lit(r.left,r.top,th,ph,p)}
+ if(window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches){park(.3,0,0);return}
+ var T0=performance.now();
+ function frame(){var t=(performance.now()-T0)/1000;if(!d.parentNode||t>2.06)return;var a=sway(t/2.4);var th=solid?a[0]*2.2:a[0],ph=gem?a[1]*3.2:solid?a[1]*3:a[1]*1.25;sw.style.transform='rotateZ('+th.toFixed(2)+'deg)';park(Math.min(1,t/2),th,ph);requestAnimationFrame(frame)}
+ if(solid)sw.style.transformOrigin='0 0';sw.style.transform='rotateZ(0deg)';park(0,0,0);requestAnimationFrame(frame)}
+window.__dlPlus=fly;
+new MutationObserver(function(){var v=val();if(v===null)return;
+ if(prev===null||Date.now()-t0<3000||document.hidden){prev=v;return}
+ var dl=Math.round((v-prev)*100)/100;prev=v;if(dl>0){var kk=window.__dlNextKind;window.__dlNextKind=null;fly(dl,kk)}}).observe(el,{childList:true,characterData:true,subtree:true});
+setTimeout(function(){prev=val()},3000)})();
+/* [S0L] CELEBRATE WHEN DADDY APPROVES (Oct 13, 2026): on HER device only. The Halo "GAME BEATEN!" party (plus the +100 animation) and the reward "APPROVED!" party now play when Daddy approves, because that is when she actually gets them. She remembers what she sent in local keys dl-gm-wait-<game id> and dl-rq-wait. Double reward opens its picker at that moment. Also says "not yet" for a declined game. */
+(function(){function cel(){if(isAdmin())return;
+ var G=gget(),n=0;GAMES.forEach(function(gm){var f='dl-gm-wait-'+gm.id;if(!g(f))return;var e=G[gm.id];if(e&&e.pending)return;try{localStorage.removeItem(f)}catch(x){}
+  if(e){showParty('🎮','GAME BEATEN!','You beat '+gm.name+' with daddy. That’s +'+gm.pts+' points!');if(window.__dlPlus)setTimeout(function(){window.__dlPlus(gm.pts)},400)}else showParty('🎮','NOT YET','Daddy said not yet on '+gm.name+'.');n++});
+ var R=rqGet(),W=wGet(),keep=[],dbl=false;
+ W.forEach(function(w){var q=R[w.k];if(q&&q.status==='pending'){keep.push(w);return}if(q&&q.status==='no')return;
+  if(!n){showParty('🎉','APPROVED!','Daddy approved \\u201c'+w.n+'\\u201d. It\\u2019s yours!');n++}if(w.i==='r11')dbl=true});
+ if(keep.length!==W.length){s('dl-rq-wait',JSON.stringify(keep));if(dbl)setTimeout(function(){openDp()},900)}}
+setInterval(cel,2000);setTimeout(cel,3500)})();
+/* [S0L] WAITING PILL (Oct 13, 2026): on Daddy's device only, a gold button at the bottom shows how many things wait for his approval (reward requests, the Perfect Day, a beaten game). Tap it to open the right screen. */
+(function(){var st=document.createElement('style');st.textContent='#dl-wait{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:99990;display:none;padding:11px 18px;border-radius:999px;border:2px solid #ffd54a;background:#1a1020;color:#ffd54a;font:800 14px system-ui,sans-serif;white-space:nowrap}#dl-wait.show{display:block}';document.head.appendChild(st);
+var w=document.createElement('button');w.type='button';w.id='dl-wait';document.body.appendChild(w);
+function parts(){var R=rqGet(),a=0,b=0,G=gget();Object.keys(R).forEach(function(k){if(R[k].status==='pending')a++});var d=load();if(d.unlocked&&d.unlocked.perfectPending)a++;Object.keys(G).forEach(function(k){if(G[k]&&G[k].pending)b++});return [a,b]}
+function upd(){var p=isAdmin()?parts():[0,0],n=p[0]+p[1];w.textContent='\u23f3 '+n+' waiting for you';w.classList.toggle('show',n>0&&!$('rw-ov').classList.contains('show')&&!gmEl.classList.contains('show'))}
+w.addEventListener('click',function(){var p=parts();if(p[0]>0){catSel='daddy';openRw()}else if(p[1]>0)openGames()});
+setInterval(upd,2000);setTimeout(upd,1500)})();
 function openRw(){
- s(OPENED,'1');unflag();hideW();
+ s(OPENED,'1');checkPerfect(true);unflag();hideW();
  $('rw-ov').classList.add('show');renderAll(true);
  window.__dlChatOpen=true;clearInterval(keep);keep=setInterval(function(){window.__dlChatOpen=true},1000);
  clearInterval(tick);tick=setInterval(function(){renderAll(false)},1000);
 }
 function closeRw(){
- $('rw-ov').classList.remove('show');pending=null;pendingDel=null;clearTimeout(pendT);clearInterval(tick);clearInterval(keep);window.__dlChatOpen=false;
+ hideMore();$('rw-ov').classList.remove('show');pending=null;pendingDel=null;clearTimeout(pendT);clearInterval(tick);clearInterval(keep);window.__dlChatOpen=false;
 }
 window.openRewards=openRw;
 
+$('rw-dbl').addEventListener('click',function(e){if(e.target.closest('[data-dpick]'))openDp()});
+$('rw-tabs').addEventListener('click',function(e){var b=e.target.closest('[data-cat]');if(!b)return;catSel=b.getAttribute('data-cat');pending=null;clearTimeout(pendT);renderList(true)});
 $('rw-close').addEventListener('click',closeRw);
 $('rw-ov').addEventListener('click',function(e){if(e.target===$('rw-ov'))closeRw()});
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&$('rw-ov').classList.contains('show'))closeRw()});
 $('rw-list').addEventListener('click',function(e){
  var mv=e.target.closest('[data-mv]');
- if(mv&&isAdmin()){var dm=load(),id3=mv.getAttribute('data-id2'),ix=dm.items.findIndex(function(i){return i.id===id3}),jx=ix+parseInt(mv.getAttribute('data-mv'),10);
+ if(mv&&isAdmin()){var dm=load(),id3=mv.getAttribute('data-id2'),ix=dm.items.findIndex(function(i){return i.id===id3}),dir=parseInt(mv.getAttribute('data-mv'),10),jx=ix+dir;while(jx>=0&&jx<dm.items.length&&catOf(dm.items[jx])!==catOf(dm.items[ix]))jx+=dir;
   if(ix<0||jx<0||jx>=dm.items.length)return;var tmp=dm.items[ix];dm.items[ix]=dm.items[jx];dm.items[jx]=tmp;save(dm);renderList(true);return}
+ var ra=e.target.closest('[data-rqa]');if(ra&&isAdmin()){rqApprove(ra.getAttribute('data-rqa'));return}
+ var rn=e.target.closest('[data-rqn]');if(rn&&isAdmin()){var R1=rqGet(),k1=rn.getAttribute('data-rqn');if(R1[k1]){R1[k1].status='no';R1[k1].savedAt=new Date().toISOString();rqSet(R1);lastSig='';renderList(true)}return}
+ var rx=e.target.closest('[data-rqx]');if(rx){var R2=rqGet();delete R2[rx.getAttribute('data-rqx')];rqSet(R2);lastSig='';renderList(true);return}
+ var ap=e.target.closest('[data-approve]');if(ap&&isAdmin()){if(!confirm('Approve the Perfect Day and unlock the reward for her?'))return;var da=load();da.unlocked=da.unlocked||{};var pq=da.unlocked.perfectPending||{};da.unlocked.perfect={day:pq.day||dayKey(),at:Date.now(),by:'daddy',approved:true};delete da.unlocked.perfectPending;save(da);lastSig='';renderList(true);return}
+ var dc=e.target.closest('[data-decline]');if(dc&&isAdmin()){if(!confirm('Not approve this Perfect Day yet? She will not be asked again today.'))return;var dd=load();dd.unlocked=dd.unlocked||{};delete dd.unlocked.perfectPending;dd.unlocked.perfectDeclined={day:dayKey(),at:Date.now()};save(dd);lastSig='';renderList(true);return}
+ var un=e.target.closest('[data-unlock]');if(un&&isAdmin()){if(!confirm('Unlock the Perfect Day reward for her now?'))return;var du=load();du.unlocked=du.unlocked||{};du.unlocked.perfect={day:dayKey(),at:Date.now(),by:'daddy',approved:true};delete du.unlocked.perfectPending;save(du);renderList(true);return}
+ var op=e.target.closest('[data-opt]');if(op){var pp=op.getAttribute('data-opt').split('|');optSel[pp[0]]=parseInt(pp[1],10)||0;pending=null;clearTimeout(pendT);renderList(true);return}
+ var mo=e.target.closest('[data-more]');if(mo){var mid=mo.getAttribute('data-more'),mit=load().items.filter(function(i){return i.id===mid})[0];if(mit)showMore(mit);return}
  var ed=e.target.closest('[data-edit]');if(ed&&isAdmin()){editing=ed.getAttribute('data-edit');renderList(true);var ni=$('rw-list').querySelector('.rw-en');if(ni)ni.focus();return}
  if(e.target.closest('[data-cancel]')){editing=null;renderList(true);return}
  var sv=e.target.closest('[data-save]');
  if(sv&&isAdmin()){var row=sv.closest('.rw-item'),nm=row.querySelector('.rw-en').value.trim(),cs=parseInt(row.querySelector('.rw-ec').value,10);
   if(!nm){row.querySelector('.rw-en').focus();return}if(!cs||cs<1){row.querySelector('.rw-ec').focus();return}
-  var ds=load();ds.items.forEach(function(i){if(i.id===sv.getAttribute('data-save')){i.name=nm;i.cost=cs;var dv=row.querySelector('.rw-ed').value.trim();if(dv)i.desc=dv;else delete i.desc}});save(ds);editing=null;renderList(true);return}
+  var ds=load();ds.items.forEach(function(i){if(i.id===sv.getAttribute('data-save')){i.name=nm;i.cost=cs;var dv=row.querySelector('.rw-ed').value.trim();if(dv)i.desc=dv;else delete i.desc;i.cat=row.querySelector('.rw-ecat').value;var mv2=row.querySelector('.rw-em').value.trim();if(mv2)i.more=mv2;else delete i.more}});save(ds);editing=null;renderList(true);return}
  var del=e.target.closest('[data-del]');
  if(del){if(!confirm('Remove this reward?'))return;var d=load();d.items=d.items.filter(function(i){return i.id!==del.getAttribute('data-del')});save(d);renderList(true);return}
  var b=e.target.closest('.rw-claim');if(!b||b.disabled)return;
  var id=b.getAttribute('data-id'),d2=load(),it=d2.items.filter(function(i){return i.id===id})[0];if(!it)return;
- if(d2.claimed.some(function(c){return c.id?c.id===it.id:c.name===it.name}))return;
+ var exN=(d2.extras&&d2.extras[id])||0,free=exN>0;
+ if(!free&&d2.claimed.some(function(c){return !c.reset&&(c.id?c.id===it.id:c.name===it.name)}))return;
  if(pending!==id){pending=id;clearTimeout(pendT);pendT=setTimeout(function(){pending=null;renderList(true)},4000);renderList(true);return}
- if(totalNow()<it.cost){pending=null;renderList(true);return}
+ var ec=free?0:effCost(it);if(!free&&totalNow()-(isAdmin()?0:rqHeld())<ec){pending=null;renderList(true);return}
  pending=null;clearTimeout(pendT);
- s(ADJ,String(getAdj()-it.cost));
- d2.claimed.push({id:it.id,name:it.name,cost:it.cost,at:Date.now()});save(d2);
+ if(!isAdmin()&&NOAPPR.indexOf(it.id)<0){if(rqOpen(it.id)){renderList(true);return}var Rq=rqGet(),rk='q'+Date.now()+Math.random().toString(36).slice(2,6);wAdd(rk,it.id,it.name);Rq[rk]={id:it.id,name:effName(it),cost:ec,free:free?1:0,at:Date.now(),status:'pending',savedAt:new Date().toISOString()};rqSet(Rq);if(navigator.vibrate)navigator.vibrate([12,45,12]);lastSig='';renderAll(true);showParty('\u23f3','SENT TO DADDY','Daddy has to approve \u201c'+it.name+'\u201d before you get it. Nothing is spent until he does.');return}
+ s(ADJ,String(getAdj()-ec));
+ if(free){d2.extras[id]=exN-1;if(!d2.extras[id])delete d2.extras[id]}
+ d2.claimed.push({id:it.id,name:effName(it)+(free?' (free)':''),cost:ec,at:Date.now()});if(it.id==='r10')d2.claimed.forEach(function(c){c.reset=1});if(it.id==='r11')d2.pendingDouble=(d2.pendingDouble||0)+1;save(d2);
  if(it.id==='skip'){s(SKIPK,JSON.stringify({day:dayKey(),at:Date.now()}));paintSkip()}
  if(navigator.vibrate)navigator.vibrate([12,45,12]);
- var el=$('pts-total');if(el)el.textContent=totalNow()-it.cost;
- renderAll(true);
+ var el=$('pts-total');if(el)el.textContent=totalNow()-ec;
+ renderAll(true);if(it.id==='r11')openDp();
 });
 $('rw-add').addEventListener('click',function(){
  var n=$('rw-new-name').value.trim(),c=parseInt($('rw-new-cost').value,10),ds0=$('rw-new-desc').value.trim();
  if(!n){$('rw-new-name').focus();return}if(!c||c<1){$('rw-new-cost').focus();return}if(!ds0){$('rw-new-desc').focus();return}/* [S0L] a description is REQUIRED when adding a reward (owner request, Oct 13, 2026) */
- var d=load();d.items.push({id:'r'+Date.now().toString(36),name:n,cost:c,desc:ds0});save(d);
- $('rw-new-name').value='';$('rw-new-cost').value='';$('rw-new-desc').value='';renderList(true);
+ var d=load();d.items.push({id:'r'+Date.now().toString(36),name:n,cost:c,desc:ds0,cat:$('rw-new-cat').value||'perks'});save(d);
+ catSel=$('rw-new-cat').value||'perks';$('rw-new-name').value='';$('rw-new-cost').value='';$('rw-new-desc').value='';renderList(true);
 });
 $('rw-owed').addEventListener('click',function(e){
  var b=e.target.closest('[data-deliver]');if(!b||!isAdmin())return;var id=b.getAttribute('data-deliver');
@@ -2576,7 +3165,7 @@ setInterval(flag,1500);flag();
 <div id="fx-w" role="dialog" aria-modal="true" aria-labelledby="fx-wt"><div class="fx-card">
 <h2 id="fx-wt">Stability update</h2>
 <p class="fx-sub">Really, really, really hoping it's better now</p>
-<div class="fx-pt"><b>1. New web address</b>The old address ran out of hosting space, so I moved the site to daddieslist.netlify.app. If you have the old one saved on your home screen, please add this new one instead. I plan to move back to the old address next month, when my hosting space starts over, and I'll let you know when I do.</div>
+<div class="fx-pt"><b>1. New web address</b>The old address ran out of hosting space, so I moved the site to daddyslist.netlify.app. If you have the old one saved on your home screen, please add this new one instead. I plan to move back to the old address next month, when my hosting space starts over, and I'll let you know when I do.</div>
 <div class="fx-pt"><b>2. Your points are safe</b>Nothing was deleted. The laptop just couldn't load or save them.</div>
 <div class="fx-pt good"><b>3. Saving should work again</b>I put a lot of work into this. Check things off on your laptop and hopefully they stay put after you refresh, and show up on your phone too.</div>
 <div class="fx-pt"><b>4. Fingers crossed it fits</b>I tried to make the layout look right on most laptops, even when you resize the window.</div>
@@ -2778,6 +3367,50 @@ if(!g(SEEN)||force){
     if(document.visibilityState==='hidden')return;
     if(document.querySelector('.grid.has-eat1'))return;
     var o=document.querySelectorAll('#dt-w.show,#sy-w.show,#fx-w.show,#rw-w.show,#th-w.show,#rs-w.show,#daddy-modal.show');if(o.length)return;
+    clearInterval(iv);show();
+  },400);
+}
+})();
+</script>
+<style>
+/* One-time "punishments are coming soon" notice (both devices), first person in the owner's voice. */
+#pn-w{position:fixed;inset:0;z-index:2147483000;display:none;align-items:center;justify-content:center;padding:22px;box-sizing:border-box;background:rgba(0,0,0,.82);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);touch-action:manipulation}
+#pn-w.show{display:flex}
+#pn-w .pn-card{width:100%;max-width:340px;max-height:100%;overflow-y:auto;box-sizing:border-box;background:#0c0510;color:#fff;border:2px solid #8b2be2;border-radius:16px;padding:24px 20px 18px;text-align:center;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 0 40px rgba(139,43,226,.35)}
+#pn-w h2{margin:0 0 4px;font-size:26px;font-weight:800;color:#fff}
+#pn-w .pn-sub{margin:0 0 16px;font-size:15px;color:#c89bff;font-weight:700}
+#pn-w .pn-pt{text-align:left;margin:0 0 12px;padding:12px;border-radius:12px;background:#150a1d;font-size:15.5px;line-height:1.45}
+#pn-w .pn-pt b{display:block;font-size:16px;margin-bottom:2px}
+#pn-w button{display:block;width:100%;padding:14px 10px;border:0;border-radius:12px;font:inherit;font-size:17px;font-weight:800;cursor:pointer;background:#8b2be2;color:#fff;margin-top:16px}
+</style>
+<div id="pn-w" role="dialog" aria-modal="true" aria-labelledby="pn-wt"><div class="pn-card">
+<h2 id="pn-wt">Punishments are coming soon</h2>
+<p class="pn-sub">just a heads up</p>
+<div class="pn-pt"><b>1. Not here yet</b>I'm still working on them, so nothing changes today.</div>
+<div class="pn-pt"><b>2. It's my call</b>Nothing will happen on its own. If something comes up, I'm the one who decides.</div>
+<div class="pn-pt"><b>3. Questions?</b>Tell me what you think and I'll listen before they start.</div>
+<button type="button" class="pn-go">Got it</button>
+</div></div>
+<script>
+(function(){
+/* [S0] PUNISHMENTS COMING SOON NOTICE (Oct 13, 2026, owner request). One-time announcement for both devices, first person in the owner's voice. It only announces; nothing about punishments is built yet (see DADDYS-LIST-MASTER-PLAN.md 12.8). Shows once the Eat card has been seen and no other popup is up, 2 seconds after load. Per-device flag dl-punish-soon-v1 (never syncs). ?punishnotice replays it. */
+var SEEN='dl-punish-soon-v1',EAT='dl-eatfix-update-v2',w=document.getElementById('pn-w');
+function g(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function s(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+var force=false;try{if(/[?&]punishnotice\b/.test(location.search)){localStorage.removeItem(SEEN);force=true}}catch(e){}
+function show(){w.classList.add('show');window.__dlChatOpen=true}
+function hide(){w.classList.remove('show');s(SEEN,'1');window.__dlChatOpen=false}
+w.querySelector('.pn-go').addEventListener('click',hide);
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&w.classList.contains('show'))hide()});
+if(!g(SEEN)||force){
+  var started=Date.now();
+  var iv=setInterval(function(){
+    if(g(SEEN)&&!force){clearInterval(iv);return}
+    if(w.classList.contains('show')||window.__dlChatOpen===true||Date.now()-started<2000)return;
+    if(document.visibilityState==='hidden')return;
+    if(!g(EAT)&&!force)return;
+    if(document.querySelector('.grid.has-eat1'))return;
+    var o=document.querySelectorAll('#ef-w.show,#dt-w.show,#sy-w.show,#fx-w.show,#rw-w.show,#th-w.show,#rs-w.show,#daddy-modal.show');if(o.length)return;
     clearInterval(iv);show();
   },400);
 }
