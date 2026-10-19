@@ -3042,19 +3042,19 @@ vec3 sqz(vec3 p){p.y-=.04;p.y/=(1.+Q);p.xz*=SQR;p.y+=.04;return p;}
 vec3 headP(vec3 p){vec3 q=p-vec3(-.08,.14,0.)-vec3(.8,1.2,0.);q.xz=HA*q.xz;q.xy=HB*q.xy;q.yz=HC*q.yz;q.y-=HBO;return q+vec3(.8,1.2,0.);}
 vec3 tp(float u){vec3 a=vec3(-.72,1.12,0.),b=vec3(-1.55,1.1,0.),c=vec3(-1.6,.3,0.);vec3 r=(1.-u)*(1.-u)*a+2.*u*(1.-u)*b+u*u*c;r.z+=.3*sin(u*2.2-T*3.)*u;r.x-=.05*sin(T*3.)*u;r.y-=TL*(.5*u*u+.1*u);r.x+=TL*.12*u*u;return r;}
 float tr(float u){return .06+.33*sin(min(u*2.7,3.14159))*(1.-u*.25);}
-float map(vec3 p){p=sqz(p);p.y*=1.17;float br=BRV;
+float map(vec3 p){p=sqz(p);p.y*=1.17;/* [S0L] REALISM v4: the spine flexes with the stride (back arches as the hind legs push, stretches in the air). */{float sp=.055*GA*sin(GP+.4);vec2 pv=p.xy-vec2(0.,1.);p.xy=mat2(cos(sp),-sin(sp),sin(sp),cos(sp))*pv+vec2(0.,1.);}float br=BRV;
 float d=ell(p-vec3(.3,1.0,0.),vec3(.37,.39*br,.27));
 d=smin(d,ell(p-vec3(-.1,.97,0.),vec3(.4,.27,.22)),.25);
 d=smin(d,ell(p-vec3(-.5,.98,0.),vec3(.32,.32,.24)),.25);
 d=smin(d,cap(p,vec3(.45,1.12,0.),vec3(.8,1.32,0.),.25,.16),.2);
 for(int i=0;i<2;i++){float s=i==0?1.:-1.;
-float lf=clamp(LT+GA*(.5+.5*sin(GP+(s>0.?0.:.7))),0.,1.3),lh=clamp(LT+GA*(.5+.5*sin(GP+3.4+(s>0.?0.:.5))),0.,1.3);
-d=smin(d,cap(p,vec3(.32,.78,s*.13),vec3(.35+.14*lf,.13+.4*lf,s*.13),.088,.046),.08);
-d=smin(d,ell(p-vec3(.41+.14*lf,.1+.4*lf,s*.13),vec3(.11,.035,.055)),.04);
+float lf=clamp(LT+GA*(.5+.5*sin(GP+(s>0.?0.:.7))),0.,1.3),lh=clamp(LT+GA*(.5+.5*sin(GP+3.4+(s>0.?0.:.5))),0.,1.3);float on=step(.01,GA),sf=clamp(lf-LT,0.,1.3)*on,sh=clamp(lh-LT,0.,1.3)*on,zf=s*(.13+.075*sf),zh=s*(.15+.1*sh);/* [S0L] REALISM v4 (Oct 18, 2026): feet swing OUT sideways as they come forward (zf, zh), so from behind you see the hind feet reach past the flanks like a real gallop. */
+d=smin(d,cap(p,vec3(.32,.78,s*.13),vec3(.35+.14*lf,.13+.4*lf,zf),.088,.046),.08);
+d=smin(d,ell(p-vec3(.41+.14*lf,.1+.4*lf,zf),vec3(.11,.035,.055)),.04);
 d=smin(d,cap(p,vec3(-.5,1.0,s*.17),vec3(-.36,.62,s*.15),.15,.09),.1);
-d=smin(d,cap(p,vec3(-.36,.62,s*.15),vec3(-.56-.08*lh,.32+.2*lh,s*.15),.09,.055),.05);
-d=smin(d,cap(p,vec3(-.56-.08*lh,.32+.2*lh,s*.15),vec3(-.5-.14*lh,.05+.34*lh,s*.15),.055,.046),.04);
-d=smin(d,ell(p-vec3(-.43-.14*lh,.03+.34*lh,s*.15),vec3(.12,.035,.062)),.04);}
+d=smin(d,cap(p,vec3(-.36,.62,s*.15),vec3(-.56-.08*lh,.32+.2*lh,s*(.15+.05*sh)),.09,.055),.05);
+d=smin(d,cap(p,vec3(-.56-.08*lh,.32+.2*lh,s*(.15+.05*sh)),vec3(-.5-.14*lh,.05+.34*lh,zh),.055,.046),.04);
+d=smin(d,ell(p-vec3(-.43-.14*lh,.03+.34*lh,zh),vec3(.12,.035,.062)),.04);}
 for(int i=0;i<8;i++){d=smin(d,cap(p,TPA[i],TPA[i+1],TRA[i],TRA[i+1]),.12);}
 vec3 h=headP(p);
 d=smin(d,ell(h-vec3(.94,1.27,0.),vec3(.25,.21,.215)),.1);
@@ -3123,7 +3123,7 @@ var mead=foxMeadow(d,MW,MH,fb,fh),st=d.querySelector('.fx-st'),sgn=d.querySelect
 var YA=.24*fh,Y0=-.62*fh,TL0=.1,TR=.68,TF=.38,TX=TL0+TR+TF,TO=PR?1e9:5.9,vmax=(YA-Y0)*1.5708/TR;
 function Sp(w,z){return{w:w,z:z,x:0,v:0,s:function(g,dt){var k=2,h=dt/k,a;while(k--){a=this.w*this.w*(g-this.x)-2*this.z*this.w*this.v;this.v+=a*h;this.x+=this.v*h}return this.x}}}
 /* FOX LOOKS AT THE BUTTERFLY (Oct 17). nosePos() is the same maths as the shader (head turn, nod, camera) so the JS knows where the fox's nose is on screen; the head yaw (BY) and pitch (BP) are then solved numerically so the nose points toward the butterfly, smoothed, and clamped so it never over-twists. The fox also perks its ears (EP), smiles (BH) while the butterfly sits on its nose, and bobs its head (BB) when the butterfly lands and takes off. */
-var slE=1/60,mk=0,em={bh:0,ep:0,el:0,bp:0},pz=1,PL=0,fwx=parseFloat(d.style.getPropertyValue('--fw'))||390,bY=0,bP=0,bB=0,bH=0,eP=0,bR=0,runT=null,runF=0,runP=0,ru=0,hp=0,gP=0,gA=0,rS=1,rDX=0,rDY=0,rLead=0,rAnt=0,rTail=0,rEar=0;
+var slE=1/60,mk=0,em={bh:0,ep:0,el:0,bp:0},pz=1,PL=0,fwx=parseFloat(d.style.getPropertyValue('--fw'))||390,bY=0,bP=0,bB=0,bH=0,eP=0,bR=0,runT=null,runF=0,runP=0,runS=0,ru=0,hp=0,gP=0,gA=0,rS=1,rDX=0,rDY=0,rLead=0,rAnt=0,rTail=0,rEar=0;
 function r2(a,x,y){var c=Math.cos(a),s=Math.sin(a);return[c*x+s*y,-s*x+c*y]}
 function nosePos(T,BY,BP,BB,HL){var hy=.28+.14*Math.sin(T*.8)+.05*Math.sin(T*2.3)+BY,bob=.02*Math.sin(T*1.7)+BB+HL*.07,q=[.635,-.05+bob,0],v,a=.72+.12*Math.sin(T*.5)+bR;
 v=r2(-.13*Math.sin(T*.9+.6),q[1],q[2]);q[1]=v[0];q[2]=v[1];v=r2(-(.1*Math.sin(T*1.1)-.2+HL*.3+BP),q[0],q[1]);q[0]=v[0];q[1]=v[1];v=r2(-hy,q[0],q[2]);q[0]=v[0];q[2]=v[1];
@@ -3151,16 +3151,18 @@ py=y;pt=t;slE+=(dt-slE)*.12;if(PR){pz=1+.12*ss(5,6,t);PL=-.04*fh*ss(5,6,t);var E
 var rt=0,tn=0,u=0;if(PR&&d.__run){if(runT==null){runT=t}rt=t-runT;
 /* [S0L] RUN AWAY v3 (Oct 17, 2026, owner: focus on getting the details perfect when he quickly turns around and runs away). Timeline in seconds since the line: 0 to .12 STARTLE (one sharp flinch: body jolts up, ears snap back, a small hop; fired once as a spring kick); .03 to .30 the HEAD whips round first (fast); .10 to .55 the BODY spins after it, ease-in-out, and overshoots the rear view by about .2 rad before settling (the sine term on bR); .28 to .55 a tight push-off crouch (rAnt); at .50 the PUSH-OFF: one big dust and grass burst (mead.hit) plus a small stretch kick; the gallop starts at .45 and speeds up fast, stride rate going from about 6 to 15 per second over the first half second (gP integrates the rate), so he accelerates into the gallop instead of a slow start; he is gone by about 3.5 s. Tweak: 2.05 (turn angle), .2 (overshoot), 15 and 9 (stride rate end and start), .55 (when the run starts), 3 (run length). */
 if(!runF&&rt>=0){runF=1;sQ.v+=2.2;sT.v+=5;sE.v-=5;sH.v+=2;mead.hit&&mead.hit(t,.55,0);try{navigator.vibrate&&navigator.vibrate(8)}catch(e){}}
+if(!runS&&rt>=.26){runS=1;mead.hit&&mead.hit(t,.4,0)}
 if(!runP&&rt>=.5){runP=1;sQ.v-=2.8;sL.v+=1.5;mead.hit&&mead.hit(t,1.25,1);try{navigator.vibrate&&navigator.vibrate(12)}catch(e){}}
-tn=ss(.1,.55,rt);bR=-2.05*tn-.2*Math.sin(Math.PI*ss(.5,.9,rt));rLead=.95*Math.sin(Math.PI*ss(.03,.5,rt))*(1-.15*ss(.25,.45,rt))+.15*ss(.03,.3,rt)*(1-ss(.5,.9,rt));rAnt=.05*Math.sin(Math.PI*ss(0,.12,rt))-.15*Math.sin(Math.PI*ss(.25,.62,rt));var tG=Math.max(0,rt-.45);u=Math.max(0,Math.min(1,(rt-.55)/3));ru=Math.pow(u,1.7);rS=1/(1+16*ru);gA=ss(.4,.75,rt)*(1-ss(.9,1,u));gP=15*tG-2.25*(1-Math.exp(-4*tG));hp=(.045*Math.sin(Math.PI*Math.min(1,rt/.14))*(rt<.14?1:0)+Math.max(0,Math.sin(gP+.9))*.05*gA*rS)*fh;rTail=-.8*ss(.35,.9,rt);rEar=1.1*ss(.02,.18,rt)*(1-.2*ss(.3,.8,rt));var D0=MH-fb-.2*fh-MH*.38;rDX=-.14*fwx*(1-rS);var S2=pz*rS;rDY=-D0*(1-rS)+.18*fh*(1-S2);if(mead.run)mead.run(t,MW*.5+rDX,MH*.38+D0*rS,S2,gA,gP)}
+tn=ss(.1,.55,rt);bR=-2.05*tn-.2*Math.sin(Math.PI*ss(.5,.9,rt));rLead=.95*Math.sin(Math.PI*ss(.03,.5,rt))*(1-.15*ss(.25,.45,rt))+.15*ss(.03,.3,rt)*(1-ss(.5,.9,rt));rAnt=.05*Math.sin(Math.PI*ss(0,.12,rt))-.15*Math.sin(Math.PI*ss(.25,.62,rt));var tG=Math.max(0,rt-.45);u=Math.max(0,Math.min(1,(rt-.55)/3));ru=Math.pow(u,1.7);rS=1/(1+16*ru);gA=ss(.4,.75,rt)*(1-ss(.9,1,u));gP=15*tG-2.25*(1-Math.exp(-4*tG));hp=(.045*Math.sin(Math.PI*Math.min(1,rt/.14))*(rt<.14?1:0)+Math.max(0,Math.sin(gP+.9))*.05*gA*rS)*fh;rTail=-.8*ss(.35,.9,rt)+.24*gA*Math.sin(gP-.7);rAnt+=.04*gA*Math.sin(gP+.9);rEar=1.1*ss(.02,.18,rt)*(1-.2*ss(.3,.8,rt))+.14*gA*Math.sin(gP+.3);var D0=MH-fb-.2*fh-MH*.38;rDX=-.14*fwx*(1-rS);var S2=pz*rS;rDY=-D0*(1-rS)+.18*fh*(1-S2);if(mead.run)mead.run(t,MW*.5+rDX,MH*.38+D0*rS,S2,gA,gP)}
 var NN=nosePos(t,bY,bP,bB,hl),bf=d.__bfp?d.__bfp(t,dt,PR?(fwx/2+(NN[0]-fwx/2)*pz)-fwx/2:NN[0]-fwx/2,PR?(.62*fh+(NN[1]-.62*fh)*pz)-.45*fh-y-PL:NN[1]-.45*fh-y):null,lw=ss(1.45,1.85,t)*(PR?1:(1-ss(5.7,6.0,t)))*(1-tn);
 if(bf){var tx=PR?bf.X/pz+fwx/2:bf.X+fwx/2,ty=PR?(bf.Y+.45*fh+y+PL-.62*fh)/pz+.62*fh:bf.Y+.45*fh+y,n0=nosePos(t,0,0,bB,hl),n1=nosePos(t,.15,0,bB,hl),n2=nosePos(t,0,.15,bB,hl),pc=bf.perch;tx=tx*(1-pc)+n0[0]*pc;ty=ty*(1-pc)+(n0[1]+.015*fh)*pc;
 var sy=(n1[0]-n0[0])/.15,sp=(n2[1]-n0[1])/.15,tY=Math.abs(sy)>1?(tx-n0[0])/sy:0,tP=Math.abs(sp)>1?(ty-n0[1])/sp:0;
 tY=Math.max(-.5,Math.min(.5,tY*.85))*lw;tP=Math.max(-.3,Math.min(.3,tP*.85))*lw;var k=1-Math.exp(-dt*6);bY+=(tY-bY)*k;bP+=(tP-bP)*k}
 var hT=Math.max(ss(2.55,2.85,t)*(1-ss(4.5,4.9,t)),.7*ss(4.9,5.2,t)*(PR?(1-ss(5.3,5.5,t)):(1-ss(5.7,6.0,t))));bH+=(hT-bH)*Math.min(1,dt*9);
 bB=-.05*pul(t,2.82,.1)+.045*pul(t,4.05,.12)-.03*pul(t,2.35,.12);eP+=(lw-eP)*Math.min(1,dt*8);
-st.style.transform='translate3d('+rDX.toFixed(1)+'px,'+(-y-PL-hp+rDY-tk*.012*fh*Math.abs(Math.sin(t*17))).toFixed(1)+'px,0) rotate('+(pi+2.2*Math.sin(gP*.5)*gA+tk*2.6*Math.sin(t*29)).toFixed(2)+'deg)'+(PR?' scale('+(pz*rS).toFixed(3)+')':'');st.style.opacity=(Math.min(1,t/.35)*(t>TO+.25?Math.max(0,1-(t-TO-.25)/.5):1)*(1-ss(.9,1,u))).toFixed(3);
+st.style.transform='translate3d('+(rDX+4*Math.sin(gP+.5)*gA*rS).toFixed(1)+'px,'+(-y-PL-hp+rDY-tk*.012*fh*Math.abs(Math.sin(t*17))).toFixed(1)+'px,0) rotate('+(pi+3.6*Math.sin(gP+.5)*gA+tk*2.6*Math.sin(t*29)).toFixed(2)+'deg)'+(PR?' scale('+(pz*rS).toFixed(3)+')':'');st.style.opacity=(Math.min(1,t/.35)*(t>TO+.25?Math.max(0,1-(t-TO-.25)/.5):1)*(1-ss(.9,1,u))).toFixed(3);
 /* [S0L] SINKING INTO THE GRASS (owner: make it look like he really disappears into the grass). The fox is drawn over the back grass rows, so while he runs away a soft mask hides his lower body: the cut line climbs from the feet up as he gets farther (grass height is fixed in screen pixels, about 58 px, so in the fox's own scaled-down pixels it covers more and more of him) until only his ears peek out, then nothing. Tweak 58 (grass cover in px), .3/.85 (when it grows) and 16 (soft edge px). */
+if(PR&&d.__run){var mb=1.5*ss(.5,.85,rt)*(1-ss(.7,1,u))*Math.sqrt(rS),hz=ss(0,.8,u);st.style.filter='blur('+mb.toFixed(2)+'px) saturate('+(1-.4*hz).toFixed(2)+') contrast('+(1-.22*hz).toFixed(2)+') brightness('+(1+.06*hz).toFixed(2)+')'}
 if(PR&&ru>0){var cvp=36*ss(.3,.85,u),SS=pz*rS,cu=(.95-cvp/(SS*fh))*100,fd=Math.min(40,16/(SS*fh)*100),mk2='linear-gradient(to bottom,#000 '+(cu-fd).toFixed(1)+'%,transparent '+cu.toFixed(1)+'%)';st.style.webkitMaskImage=mk2;st.style.maskImage=mk2}
 if(sgn&&PR)sgn.style.opacity=(1-ss(4.9,5.4,t)).toFixed(2);if(sgn)sgn.style.transform='translate3d(0,'+(sl*fh*.045-q*fh*.38).toFixed(1)+'px,0) rotate('+(sl*7).toFixed(2)+'deg)';
 gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.uniform1f(uT,t);gl.uniform1f(uQ,q+rAnt);gl.uniform1f(uTL,tl+rTail+tk*.5*Math.sin(t*27));gl.uniform1f(uEL,el+em.el+rEar+tk*.6);gl.uniform1f(uHL,hl);gl.uniform1f(uLT,lg);gl.uniform1f(uBY,bY+rLead+.14*tk*Math.sin(t*21));gl.uniform1f(uBP,bP+em.bp);gl.uniform1f(uBH,Math.max(bH,em.bh,Math.min(1,tk*2.5)));gl.uniform1f(uBB,bB);gl.uniform1f(uEP,eP+em.ep);gl.uniform1f(uBR,bR);gl.uniform1f(uGP,gP);gl.uniform1f(uGA,gA);gl.drawArrays(gl.TRIANGLES,0,3);if(slE<.022||(mk^=1))mead(t,y-(1-rS)*.32*fh,q);requestAnimationFrame(frame)}requestAnimationFrame(frame)}
@@ -3180,17 +3182,19 @@ var tf={x:x+tw*.5,y:Hh*ROWS[r][0]+(rnd()-.5)*6*sc*s,h:h,w:tw,n:n,b:bl,p:PAL[r],p
 var imp=[],puf=[],bit=[],fy=Hh-fb-fh*.12,GC=['#6fcf4a','#a8e45a','#e8d048','#3c9a3a'];
 function gust(t,k){var g=0,i,m,dt,ds,ph;for(i=0;i<imp.length;i++){m=imp[i];dt=t-m.t;if(dt<0||dt>2.4)continue;ds=Math.abs(k-m.x);ph=dt-ds/620;if(ph<0)continue;g+=(k<m.x?-1:1)*m.s*Math.exp(-ph*2.6)*Math.sin(ph*14)*Math.exp(-ds/(Ww*.7))*1.3}return g}
 function hit(t,s,k){var i,n=k?7:5,m=k?14:9;for(i=0;i<n;i++)puf.push({t:t,x:Ww*.5+(rnd()-.5)*fh*(k?.5:.3),vx:(rnd()-.5)*(k?120:70),r:(k?13:9)+rnd()*10,a:k?.34:.24});
-for(i=0;i<m;i++)bit.push({t:t,x:Ww*.5+(rnd()-.5)*fh*.4,vx:(rnd()-.5)*(k?260:160),vy:-(k?200:260)-rnd()*(k?240:300),rot:rnd()*6.28,vr:(rnd()-.5)*12,c:GC[Math.floor(rnd()*4)],l:.7+rnd()*.5,z:2+rnd()*2.4});imp.push({t:t,x:Ww*.5,s:s})}
+for(i=0;i<(k?m*2:m);i++)bit.push({t:t,x:Ww*.5+(rnd()-.5)*fh*.4,vx:(rnd()-.5)*(k?260:160),vy:-(k?200:260)-rnd()*(k?240:300),rot:rnd()*6.28,vr:(rnd()-.5)*12,c:GC[Math.floor(rnd()*4)],l:.7+rnd()*.5,z:2+rnd()*2.4});imp.push({t:t,x:Ww*.5,s:s})}
 /* [S0L] GRASS REACTS TO THE RUNNING FOX (owner: it did not look like he was running through the grass). F.run(t,x,y,S,gA,gP) is called every frame by the fox while he gallops away (x,y = his feet in this layer, S = his current size). (1) TRAIL: his path is remembered for 1.7 s and every tuft near it (same depth and sideways) bends AWAY from the path, is pressed flatter and wobbles back (see wake()). (2) KICKS: each stride landing throws a few grass bits and a little dust at his feet, scaled by his size, plus a small ripple. (3) DEPTH: tufts of the back rows that are NEARER the camera than his feet (tf.y > rfy) are drawn on the FRONT canvas, so they cover his legs and body and he really runs through the grass. Tweak the sigmas in wake() (70 / 30), the decay 1.6, and the bend 1.8 / press .4. */
 var trail=[],rfy=null,lastTr=-9,lastC=-1;
-function kick(t,x,y,S){var i,n=4;for(i=0;i<2;i++)puf.push({t:t,x:x+(rnd()-.5)*40*S,y0:y,vx:(rnd()-.5)*50*S,r:(5+rnd()*7)*(.3+S),a:.3});
+function kick(t,x,y,S){var i,n=Math.round(5+7*S);for(i=0;i<3;i++)puf.push({t:t,x:x+(rnd()-.5)*50*S,y0:y,vx:(rnd()-.5)*60*S,r:(5+rnd()*8)*(.3+S),a:.3});
+for(i=0;i<Math.round(2+4*S);i++)bit.push({t:t,x:x+(rnd()-.5)*70*S,y0:y-rnd()*10*S,vx:(rnd()-.5)*50,vy:-(40+rnd()*110)*(.4+S),rot:rnd()*6.28,vr:(rnd()-.5)*5,c:'#fff8d0',l:1+rnd()*.9,z:.9+rnd()*.9,g:30});/* [S0L] REALISM v4: pollen and seed fluff that hangs in the air behind him (light, barely falls) */
+
 for(i=0;i<n;i++)bit.push({t:t,x:x+(rnd()-.5)*60*S,y0:y,vx:(rnd()-.5)*200*S-60*S,vy:-(130+rnd()*190)*(.35+S),rot:rnd()*6.28,vr:(rnd()-.5)*14,c:GC[Math.floor(rnd()*4)],l:.5+rnd()*.5,z:(1.4+rnd()*2.2)*(.5+S)});imp.push({t:t,x:x,s:.25+.5*S})}
 function run(t,x,y,S,gA,gP){rfy=y;if(t-lastTr>.04){trail.push({t:t,x:x,y:y,s:S});lastTr=t;while(trail.length&&t-trail[0].t>1.7)trail.shift()}
 var cN=Math.floor((gP+.9)/Math.PI);if(gA>.3&&cN!==lastC){lastC=cN;kick(t,x,y,S)}}
-function wake(t,tf){var i,p,a,dx,dy,sx,sy,w,push=0,flat=0;for(i=0;i<trail.length;i++){p=trail[i];a=t-p.t;if(a>1.7)continue;dx=tf.x-p.x;dy=tf.y-p.y;sx=(70*p.s+16)*(1+.3*a);sy=30*p.s+8+8*tf.s;w=Math.exp(-dx*dx/(2*sx*sx)-dy*dy/(2*sy*sy)-a*1.6);if(w<.01)continue;push+=(dx>0?1:-1)*w*(1+.35*Math.sin(a*17));flat+=w}
-return[Math.max(-2.4,Math.min(2.4,push*.5)),Math.min(.9,flat*.25)]}
+function wake(t,tf){var i,p,a,dx,dy,sx,sy,w,push=0,flat=0;for(i=0;i<trail.length;i++){p=trail[i];a=t-p.t;if(a>1.7)continue;dx=tf.x-p.x;dy=tf.y-p.y;sx=(70*p.s+16)*(1+.3*a);sy=30*p.s+8+8*tf.s;w=Math.exp(-dx*dx/(2*sx*sx)-dy*dy/(2*sy*sy)-a*1.6);if(w<.01)continue;push+=(dx>0?1:-1)*w*(1.1*Math.cos(a*4.4)+.25*Math.min(1,a*3)*Math.sin(a*17));/* [S0L] REALISM v4: blades spring back PAST upright and settle (damped oscillation), not just ease back */flat+=w}
+return[Math.max(-3.2,Math.min(3.2,push*.55)),Math.min(.9,flat*.25)]}
 function fxp(c,t){var i,p,a,al,rr;for(i=puf.length-1;i>=0;i--){p=puf[i];a=t-p.t;if(a>1){puf.splice(i,1);continue}al=p.a*(1-a)*(1-a);rr=p.r+a*58;var px=p.x+p.vx*a,py2=(p.y0==null?fy:p.y0)-a*16-rr*.15,gd=c.createRadialGradient(px,py2,0,px,py2,rr);gd.addColorStop(0,'rgba(255,248,205,'+(al*1.1).toFixed(3)+')');gd.addColorStop(.6,'rgba(226,240,170,'+(al*.55).toFixed(3)+')');gd.addColorStop(1,'rgba(226,240,170,0)');c.fillStyle=gd;c.beginPath();c.arc(px,py2,rr,0,6.283);c.fill()}
-for(i=bit.length-1;i>=0;i--){p=bit[i];a=t-p.t;if(a>p.l){bit.splice(i,1);continue}c.save();c.globalAlpha=Math.min(1,(p.l-a)/.25);c.translate(p.x+p.vx*a,(p.y0==null?fy:p.y0)+p.vy*a+420*a*a);c.rotate(p.rot+p.vr*a);c.fillStyle=p.c;c.beginPath();c.ellipse(0,0,p.z*1.9,p.z*.6,0,0,6.283);c.fill();c.restore()}}
+for(i=bit.length-1;i>=0;i--){p=bit[i];a=t-p.t;if(a>p.l){bit.splice(i,1);continue}c.save();c.globalAlpha=Math.min(1,(p.l-a)/.25);c.translate(p.x+p.vx*a,(p.y0==null?fy:p.y0)+p.vy*a+(p.g==null?420:p.g)*a*a);c.rotate(p.rot+p.vr*a);c.fillStyle=p.c;c.beginPath();c.ellipse(0,0,p.z*1.9,p.z*.6,0,0,6.283);c.fill();c.restore()}}
 function tuft(c,t,tf){var y=tf.y,h=tf.h,P=tf.p,k=tf.x,i,b,wk=trail.length?wake(t,tf):null;
 c.fillStyle='rgba(0,28,6,.3)';c.beginPath();c.ellipse(k,y+2,tf.w*.58,Math.max(4,h*.11),0,0,6.283);c.fill();
 var g=tf.g;if(!g){g=tf.g=c.createLinearGradient(0,y,0,y-h);g.addColorStop(0,P[0]);g.addColorStop(.5,P[1]);g.addColorStop(1,tf.gold?'#f0d048':P[2])}c.fillStyle=g;
